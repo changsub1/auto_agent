@@ -18,8 +18,11 @@ The new Discord flow adds human-in-the-loop planning approval:
   -> Planner Agent A draft
   -> Planner Agent B review
   -> Planner Agent A final plan
-  -> Discord approve / request changes / cancel
-  -> Developer Agent creates app
+  -> Architect Agent contract bundle
+  -> Discord contract approve / request changes / cancel
+  -> Scaffold Agent creates scaffold_app
+  -> Code Agents implement isolated workspaces in parallel
+  -> Integrator Agent merges generated_app
   -> Python syntax QA
 ```
 
@@ -81,7 +84,16 @@ set DISCORD_ALLOWED_CHANNEL_ID=channel_id
 set DISCORD_ALLOWED_USER_IDS=user_id_1,user_id_2
 set PLANNER_A_CODEX_HOME=C:\Users\USER\.codex_planner_a
 set PLANNER_B_CODEX_HOME=C:\Users\USER\.codex_planner_b
+set ARCHITECT_CODEX_HOME=C:\Users\USER\.codex_architect
+set SCAFFOLD_CODEX_HOME=C:\Users\USER\.codex_developer
 set DEVELOPER_CODEX_HOME=C:\Users\USER\.codex_developer
+set INTEGRATOR_CODEX_HOME=C:\Users\USER\.codex_developer
+set CODE_AGENT_CODEX_HOMES=C:\Users\USER\.codex_developer_1,C:\Users\USER\.codex_developer_2
+set CODE_AGENT_COUNT=2
+set QA_AGENT_CODEX_HOMES=C:\Users\USER\.codex_qa
+set QA_AGENT_COUNT=1
+set CODEX_MODEL=gpt-5.4
+set CODEX_REASONING_EFFORT=medium
 set MAX_FIX_ITERATIONS=1
 set CODEX_TIMEOUT_SECONDS=900
 ```
@@ -98,15 +110,65 @@ In Discord:
 /dev CSV file upload app that previews data and shows missing value counts.
 ```
 
-The bot posts Planner A's draft, Planner B's review, and the final plan. The
-requesting user then gets buttons:
+The bot posts Planner A's draft, Planner B's review, Planner A's final plan,
+and the Architect contract bundle summary. The requesting user then gets
+buttons:
 
 - Approve
 - Request changes
 - Cancel
 
-Approval starts the Developer Agent. A revision request sends the feedback back
-into the planning loop.
+Approval starts scaffold, parallel Code Agents, integration, and QA. A contract
+revision request sends the feedback back into the planning loop. After QA, the
+bot posts the report and any screenshots, then asks the requester to approve
+the result or request implementation fixes. Fixes are routed to the owning
+`code_N` session when QA identifies an owned path or suspected owner; shared,
+cross-agent, or unknown issues go to the Integrator. `DeveloperAgent` remains
+only for the legacy single-developer CLI path.
+
+Executable browser QA uses Playwright when it is installed. Install the Python
+package through `requirements.txt`, then install Chromium once:
+
+```bash
+python -m playwright install chromium
+```
+
+## Local Dashboard Usage
+
+The Streamlit dashboard is a local run control panel for testing the
+contract-first workflow without Discord.
+
+```bash
+python -m streamlit run dashboard.py
+```
+
+If Streamlit is installed in the local Miniconda Python on this machine, use:
+
+```bash
+D:\miniconda3\python.exe -m streamlit run dashboard.py
+```
+
+The dashboard supports:
+
+- `planning_only`
+- `contract_only`
+- `scaffold_only`
+
+`full_run` is shown but disabled for now because the Discord approval workflow
+still owns full scaffold/code/integration/QA execution. The dashboard reuses the
+same environment variable defaults as the Discord bot, including `CODEX_HOME`,
+model, reasoning effort, timeouts, and code-agent counts.
+
+The dashboard displays:
+
+- run id and local run path
+- `state.json`
+- `events.jsonl`
+- `transcript.md`
+- `contract/*`
+- `qa_report.md` when available
+
+It never reads or displays `auth.json`.
 
 ## Run Output
 
@@ -122,10 +184,36 @@ runs/YYYYMMDD_HHMMSS/
     01_planner_a_draft.md
     02_planner_b_review.md
     03_final_plan.md
+  contract/
+    requirements.md
+    architecture.md
+    api_contract.md
+    data_model.md
+    task_manifest.json
+    file_ownership.md
+    acceptance_tests.md
+    integration_plan.md
+  scaffold_app/
+  agent_workspaces/
+    code_1/
+    code_2/
+  agent_outputs/
+    assignment_summary.md
+    code_1_summary.md
+    code_2_summary.md
+  integration/
+    merged_app/
+    merge_seed_report.md
   generated_app/
     app.py
     requirements.txt
     README.md
+  qa/
+    attempt_00/
+      syntax_report.md
+      executable_qa_report.md
+      screenshot_initial.png
+      screenshot_after_keys.png
   qa_report.md
   logs/
     *_prompt.txt
@@ -151,11 +239,58 @@ Local files are still written for audit and recovery:
 - `events.jsonl`: append-only machine-readable event log
 - `transcript.md`: human-readable conversation and artifact log
 - `planning/*.md`: planning artifacts
+- `contract/*`: Architect-created contract bundle and task manifest
+- `scaffold_app/`: shared skeleton copied into each code-agent workspace
+- `agent_workspaces/*`: isolated parallel code-agent workspaces
+- `integration/merged_app`: Integrator output before it is copied to `generated_app`
+- `qa/`: syntax reports, executable QA reports, screenshots, and runtime logs
 - `logs/*`: raw Codex prompt/stdout/stderr/meta logs
 
 The engine intentionally avoids sending the full transcript on every turn. It
 prefers Codex session resume and only sends the new feedback, review, or latest
 artifact needed for that turn.
+
+## Multi-account Codex CLI Setup
+
+Use one `CODEX_HOME` directory per local Codex account. Configure file-based
+credential storage in each profile so each account keeps its own `auth.json`:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Example PowerShell login flow:
+
+```powershell
+$env:CODEX_HOME = "D:\codex_profiles\account_1"
+codex.cmd login
+codex.cmd login status
+
+$env:CODEX_HOME = "D:\codex_profiles\account_2"
+codex.cmd login
+codex.cmd login status
+```
+
+Then assign those profile paths through the existing agent environment
+variables, such as `PLANNER_A_CODEX_HOME`, `PLANNER_B_CODEX_HOME`, and
+`DEVELOPER_CODEX_HOME`. The Phase 3 plan in `PARALLEL_AGENT_PLAN.md` describes
+the future generalized account and agent registry.
+
+Current assignment example with Planner A/B on account 1 and the remaining
+agents on account 2:
+
+```bat
+set PLANNER_A_CODEX_HOME=D:\codex_profiles\account_1
+set PLANNER_B_CODEX_HOME=D:\codex_profiles\account_1
+set ARCHITECT_CODEX_HOME=D:\codex_profiles\account_2
+set SCAFFOLD_CODEX_HOME=D:\codex_profiles\account_2
+set CODE_AGENT_CODEX_HOMES=D:\codex_profiles\account_2
+set CODE_AGENT_COUNT=2
+set QA_AGENT_CODEX_HOMES=D:\codex_profiles\account_2
+set QA_AGENT_COUNT=1
+set INTEGRATOR_CODEX_HOME=D:\codex_profiles\account_2
+set DEVELOPER_CODEX_HOME=D:\codex_profiles\account_2
+```
 
 ## Safety Notes
 
@@ -170,5 +305,5 @@ artifact needed for that turn.
 ## Syntax Check
 
 ```bash
-python -m py_compile main.py agents.py codex_runner.py workspace_manager.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py
+python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py
 ```

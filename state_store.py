@@ -27,7 +27,23 @@ class StateStore:
         user_request: str,
         discord: dict[str, Any] | None = None,
         max_fix_iterations: int = 1,
+        code_agent_count: int = 1,
+        qa_agent_count: int = 1,
     ) -> dict[str, Any]:
+        agent_sessions = {
+            "planner_a": {"session_id": None, "codex_home": None, "last_step": None},
+            "planner_b": {"session_id": None, "codex_home": None, "last_step": None},
+            "architect": {"session_id": None, "codex_home": None, "last_step": None},
+            "scaffold": {"session_id": None, "codex_home": None, "last_step": None},
+            "developer": {"session_id": None, "codex_home": None, "last_step": None},
+            "integrator": {"session_id": None, "codex_home": None, "last_step": None},
+            "qa": {"session_id": None, "codex_home": None, "last_step": None},
+        }
+        for index in range(1, max(1, code_agent_count) + 1):
+            agent_sessions[f"code_{index}"] = {"session_id": None, "codex_home": None, "last_step": None}
+        for index in range(1, max(1, qa_agent_count) + 1):
+            agent_sessions[f"qa_{index}"] = {"session_id": None, "codex_home": None, "last_step": None}
+
         state = {
             "run_id": self.run_id,
             "status": "planning_started",
@@ -36,12 +52,8 @@ class StateStore:
             "user_request": user_request,
             "max_fix_iterations": max_fix_iterations,
             "discord": discord or {},
-            "agent_sessions": {
-                "planner_a": {"session_id": None, "codex_home": None, "last_step": None},
-                "planner_b": {"session_id": None, "codex_home": None, "last_step": None},
-                "developer": {"session_id": None, "codex_home": None, "last_step": None},
-                "qa": {"session_id": None, "codex_home": None, "last_step": None},
-            },
+            "parallel": {"code_agent_count": max(1, code_agent_count), "qa_agent_count": max(1, qa_agent_count)},
+            "agent_sessions": agent_sessions,
             "artifacts": {},
             "approval_history": [],
         }
@@ -80,6 +92,8 @@ class StateStore:
         *,
         session_id: str | None = None,
         codex_home: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
         last_step: str | None = None,
     ) -> dict[str, Any]:
         state = self.load()
@@ -88,6 +102,10 @@ class StateStore:
             agent["session_id"] = session_id
         if codex_home is not None:
             agent["codex_home"] = codex_home
+        if model is not None:
+            agent["model"] = model
+        if reasoning_effort is not None:
+            agent["reasoning_effort"] = reasoning_effort
         if last_step:
             agent["last_step"] = last_step
         self.save(state)

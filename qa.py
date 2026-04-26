@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from executable_qa import ExecutableQAResult
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,12 @@ class QAResult:
     error_log: str
     report_path: Path
     report_markdown: str
+    screenshots: list[Path] = field(default_factory=list)
+    artifact_paths: list[Path] = field(default_factory=list)
+    executable_status: str | None = None
+    executable_app_type: str | None = None
+    affected_paths: list[str] = field(default_factory=list)
+    suspected_owners: list[str] = field(default_factory=list)
 
 
 def run_python_syntax_check(
@@ -25,6 +33,7 @@ def run_python_syntax_check(
     attempt_name: str = "syntax check",
     append: bool = False,
     timeout: int = 120,
+    fail_on_missing_python: bool = True,
 ) -> QAResult:
     """Run `python -m py_compile` for every .py file under app_dir."""
 
@@ -35,7 +44,7 @@ def run_python_syntax_check(
     errors: list[str] = []
     checked_files: list[Path] = []
 
-    if not py_files:
+    if not py_files and fail_on_missing_python:
         errors.append(f"No Python files were found in {app_dir}.")
 
     for py_file in py_files:
@@ -90,6 +99,61 @@ def run_python_syntax_check(
         error_log=error_log,
         report_path=report_path,
         report_markdown=report,
+    )
+
+
+def combine_mechanical_qa_results(
+    *,
+    syntax_result: QAResult,
+    executable_result: ExecutableQAResult,
+    report_path: Path,
+    attempt_name: str,
+) -> QAResult:
+    """Combine syntax QA and executable QA into the public run QA report."""
+
+    executable_blocks = executable_result.status == "FAIL"
+    ok = syntax_result.ok and not executable_blocks
+    error_parts = []
+    if syntax_result.error_log:
+        error_parts.append(syntax_result.error_log)
+    if executable_blocks and executable_result.error_log:
+        error_parts.append(executable_result.error_log)
+    error_log = "\n\n".join(error_parts)
+
+    status = "PASS" if ok else "FAIL"
+    report = "\n".join(
+        [
+            f"# {attempt_name}",
+            "",
+            f"- Time: {datetime.now().isoformat(timespec='seconds')}",
+            f"- Status: {status}",
+            f"- Syntax QA: {'PASS' if syntax_result.ok else 'FAIL'}",
+            f"- Executable QA: {executable_result.status}",
+            f"- Executable app type: `{executable_result.app_type}`",
+            "",
+            "## Syntax QA",
+            "",
+            syntax_result.report_markdown.strip(),
+            "",
+            "## Executable QA",
+            "",
+            executable_result.report_markdown.strip(),
+            "",
+        ]
+    )
+    _write_report(report_path, report, append=False)
+
+    return QAResult(
+        ok=ok,
+        checked_files=syntax_result.checked_files,
+        error_log=error_log,
+        report_path=report_path,
+        report_markdown=report,
+        screenshots=executable_result.screenshots,
+        artifact_paths=[syntax_result.report_path, executable_result.report_path, *executable_result.artifact_paths],
+        executable_status=executable_result.status,
+        executable_app_type=executable_result.app_type,
+        affected_paths=[path.as_posix() for path in syntax_result.checked_files if not syntax_result.ok],
     )
 
 

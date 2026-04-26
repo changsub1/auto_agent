@@ -71,6 +71,31 @@ class DiscordReporter:
             lines.append(f"- QA status: {'PASS' if ok else 'FAIL'}")
         return await channel.send("\n".join(lines))
 
+    async def send_files(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        title: str,
+        paths: list[Path],
+        limit: int = 4,
+    ) -> list[discord.Message]:
+        messages: list[discord.Message] = []
+        existing_paths = [path for path in paths if path.exists()]
+        if not existing_paths:
+            messages.append(await channel.send(f"**{title}**\nNo files were produced."))
+            return messages
+
+        for path in existing_paths[:limit]:
+            messages.append(
+                await channel.send(
+                    content=f"**{title}** `{path.name}`\n`{path}`",
+                    file=discord.File(str(path)),
+                )
+            )
+        if len(existing_paths) > limit:
+            messages.append(await channel.send(f"{len(existing_paths) - limit} additional file(s) saved locally."))
+        return messages
+
 
 def _chunks(text: str, size: int) -> list[str]:
     return [text[index : index + size] for index in range(0, len(text), size) if text[index : index + size]]

@@ -23,9 +23,21 @@ class CodexDevBot(commands.Bot):
             reporter=DiscordReporter(),
             planner_a_codex_home=config.planner_a_codex_home,
             planner_b_codex_home=config.planner_b_codex_home,
+            architect_codex_home=config.architect_codex_home,
+            scaffold_codex_home=config.scaffold_codex_home,
             developer_codex_home=config.developer_codex_home,
+            integrator_codex_home=config.integrator_codex_home,
+            code_agent_codex_homes=config.code_agent_codex_homes,
+            code_agent_count=config.code_agent_count,
+            qa_agent_codex_homes=config.qa_agent_codex_homes,
+            qa_agent_count=config.qa_agent_count,
+            codex_model=config.codex_model,
+            codex_reasoning_effort=config.codex_reasoning_effort,
             max_fix_iterations=config.max_fix_iterations,
             codex_timeout_seconds=config.codex_timeout_seconds,
+            executable_qa_enabled=config.executable_qa_enabled,
+            executable_qa_timeout_seconds=config.executable_qa_timeout_seconds,
+            executable_qa_allow_local_commands=config.executable_qa_allow_local_commands,
         )
 
     async def setup_hook(self) -> None:

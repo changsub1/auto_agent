@@ -17,16 +17,22 @@ class PlannerAgent:
         codex_home: str | None = None,
         logs_dir: Path | None = None,
         timeout: int = 600,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
 
     def create_plan(self, user_request: str, workdir: Path) -> str:
         return PlannerAgentA(
             codex_home=self.codex_home,
             logs_dir=self.logs_dir,
             timeout=self.timeout,
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
         ).create_initial_plan(user_request, workdir).stdout
 
 
@@ -39,10 +45,14 @@ class PlannerAgentA:
         codex_home: str | None = None,
         logs_dir: Path | None = None,
         timeout: int = 600,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
 
     def create_initial_plan(
         self,
@@ -142,6 +152,8 @@ class PlannerAgentA:
             label=label,
             session_id=session_id,
             sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
         )
 
 
@@ -154,10 +166,14 @@ class PlannerAgentB:
         codex_home: str | None = None,
         logs_dir: Path | None = None,
         timeout: int = 600,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
 
     def review_plan(
         self,
@@ -210,6 +226,553 @@ class PlannerAgentB:
             label="planner_b_review",
             session_id=session_id,
             sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+
+class ArchitectAgent:
+    """Creates the contract bundle used to coordinate parallel implementation."""
+
+    def __init__(
+        self,
+        *,
+        codex_home: str | None = None,
+        logs_dir: Path | None = None,
+        timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.codex_home = codex_home
+        self.logs_dir = logs_dir
+        self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
+    def create_contract_bundle_result(
+        self,
+        user_request: str,
+        planner_a_draft: str,
+        planner_b_review: str,
+        final_plan: str,
+        contract_dir: Path,
+        *,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            You are Architect Agent in a Codex CLI multi-agent development workflow.
+            Create a contract bundle for parallel code agents. Do not ask follow-up questions.
+
+            Work only in the current working directory. The current working directory is
+            the contract directory. Create or overwrite only these files:
+            - requirements.md
+            - architecture.md
+            - api_contract.md
+            - data_model.md
+            - task_manifest.json
+            - file_ownership.md
+            - acceptance_tests.md
+            - integration_plan.md
+
+            User request:
+            {user_request}
+
+            Planner A draft:
+            {planner_a_draft}
+
+            Planner B review:
+            {planner_b_review}
+
+            Approved final plan:
+            {final_plan}
+
+            Contract rules:
+            - Keep the MVP small and runnable locally.
+            - Prefer Python.
+            - Split work into 2 to 6 implementation tasks.
+            - Design task boundaries so code agents can work in parallel.
+            - Each task must have clear owned_paths that avoid overlap with other tasks.
+            - Shared entrypoint files should be handled by the Integrator where possible.
+            - Include dependencies between tasks only when necessary.
+            - Do not require external APIs unless explicitly requested.
+            - Do not store personal information.
+
+            task_manifest.json must be valid JSON with this shape:
+            {{
+              "version": 1,
+              "tasks": [
+                {{
+                  "id": "T1",
+                  "title": "...",
+                  "summary": "...",
+                  "dependencies": [],
+                  "owned_paths": ["..."],
+                  "allowed_shared_paths": ["..."],
+                  "forbidden_paths": ["contract/", "runs/", "agent_workspaces/"],
+                  "interfaces": ["..."],
+                  "acceptance_criteria": ["..."]
+                }}
+              ]
+            }}
+
+            When finished, print a concise summary of the contract and task split.
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=contract_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="architect_contract",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+
+class ScaffoldAgent:
+    """Creates the shared skeleton that code agents copy before parallel work."""
+
+    def __init__(
+        self,
+        *,
+        codex_home: str | None = None,
+        logs_dir: Path | None = None,
+        timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.codex_home = codex_home
+        self.logs_dir = logs_dir
+        self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
+    def create_scaffold_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        scaffold_dir: Path,
+        *,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            You are Scaffold Agent in a Codex CLI multi-agent development workflow.
+            Create only the shared project skeleton for later parallel code agents.
+            Do not ask follow-up questions.
+
+            Work only in the current working directory. The current working directory is
+            scaffold_app. Do not modify files outside it.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Requirements:
+            - Create a runnable Python project skeleton.
+            - Include app.py, requirements.txt, and README.md unless the contract says otherwise.
+            - Add empty or minimal modules that match the contract boundaries.
+            - Add placeholders only; do not implement feature-specific logic in full.
+            - Keep imports valid so Python syntax QA can run after integration.
+            - README.md must include the expected run command.
+            - Keep dependencies minimal.
+
+            When finished, print a short summary of files created.
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=scaffold_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="scaffold",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+
+class CodeAgent:
+    """Implements one assigned task group inside an isolated workspace."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        codex_home: str | None = None,
+        logs_dir: Path | None = None,
+        timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.codex_home = codex_home
+        self.logs_dir = logs_dir
+        self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
+    def implement_tasks_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assigned_tasks_json: str,
+        workspace_dir: Path,
+        *,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            You are {self.agent_id}, a Code Agent in a parallel Codex development workflow.
+            Implement only your assigned tasks. Do not ask follow-up questions.
+
+            Work only in the current working directory. The current working directory is
+            your isolated agent workspace. Do not modify files outside it.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Your assignment:
+            {assigned_tasks_json}
+
+            Implementation rules:
+            - Implement only the assigned tasks.
+            - Prefer editing owned_paths from your assignment.
+            - Avoid editing allowed_shared_paths unless your task cannot work without it.
+            - Never edit forbidden_paths.
+            - Keep public interfaces compatible with the contract.
+            - Keep the app runnable locally.
+            - Keep dependencies minimal.
+            - If you add tests, keep them lightweight and local.
+
+            When finished, print:
+            1. Files changed
+            2. Tasks completed
+            3. Tests added or run
+            4. Any integration notes for the Integrator Agent
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=self.agent_id,
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    def fix_assigned_tasks_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assigned_tasks_json: str,
+        qa_feedback: str,
+        workspace_dir: Path,
+        *,
+        iteration: int,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            Continue as {self.agent_id}, a Code Agent in a parallel Codex development workflow.
+            The integrated app failed QA or the user requested fixes. Resume your own work,
+            inspect the feedback, and update only the files owned or allowed by your assignment.
+
+            Work only in the current working directory. Do not modify files outside it.
+            Do not ask follow-up questions.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Your assignment:
+            {assigned_tasks_json}
+
+            QA/user feedback:
+            {qa_feedback}
+
+            Fix iteration: {iteration}
+
+            Rules:
+            - Prefer owned_paths from your assignment.
+            - Edit allowed_shared_paths only when necessary.
+            - Never edit forbidden_paths.
+            - Keep public interfaces compatible with the contract.
+            - Keep the app runnable locally.
+
+            When finished, print:
+            1. Files changed
+            2. Issues fixed
+            3. Tests added or run
+            4. Any integration notes for the Integrator Agent
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+
+class IntegratorAgent:
+    """Merges parallel code-agent outputs into the final app."""
+
+    def __init__(
+        self,
+        *,
+        codex_home: str | None = None,
+        logs_dir: Path | None = None,
+        timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.codex_home = codex_home
+        self.logs_dir = logs_dir
+        self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
+    def integrate_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+        run_dir: Path,
+        *,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            You are Integrator Agent in a parallel Codex development workflow.
+            Merge the code-agent outputs into integration/merged_app.
+            Do not ask follow-up questions.
+
+            Work in the run directory. You may read contract/, scaffold_app/,
+            agent_workspaces/, agent_outputs/, and integration/.
+            Write only inside integration/merged_app.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Assignment summary:
+            {assignment_summary}
+
+            Workspace file listing:
+            {workspace_listing}
+
+            Requirements:
+            - Ensure integration/merged_app is the final runnable Python app.
+            - Connect feature modules through the shared entrypoint.
+            - Resolve conflicts consistently with the contract.
+            - Preserve useful tests and docs from code agents.
+            - Ensure app.py, requirements.txt, and README.md exist unless the contract says otherwise.
+            - Keep dependencies minimal.
+            - Do not write outside integration/merged_app.
+
+            When finished, print a concise integration report with files changed and any residual risks.
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="integrator",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    def repair_integration_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+        qa_feedback: str,
+        run_dir: Path,
+        *,
+        iteration: int,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = dedent(
+            f"""
+            Continue as Integrator Agent in a parallel Codex development workflow.
+            The integrated app failed QA or the user requested fixes.
+
+            Work in the run directory. You may read contract/, scaffold_app/,
+            agent_workspaces/, agent_outputs/, and integration/.
+            Write only inside integration/merged_app. Do not ask follow-up questions.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Assignment summary:
+            {assignment_summary}
+
+            Workspace file listing:
+            {workspace_listing}
+
+            QA/user feedback:
+            {qa_feedback}
+
+            Fix iteration: {iteration}
+
+            Requirements:
+            - Fix shared entrypoints, merge errors, missing files, or cross-agent integration bugs.
+            - Do not overwrite a code agent's owned implementation unless needed to connect it.
+            - Keep app.py, requirements.txt, and README.md valid unless the contract says otherwise.
+            - Keep dependencies minimal.
+            - Do not write outside integration/merged_app.
+
+            When finished, print a concise repair report with files changed and residual risks.
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"integrator_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+
+class QAAgent:
+    """Reviews mechanical QA artifacts and screenshots against the contract."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        codex_home: str | None = None,
+        logs_dir: Path | None = None,
+        timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.codex_home = codex_home
+        self.logs_dir = logs_dir
+        self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
+    def review_result(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        qa_report: str,
+        screenshot_paths: list[Path],
+        run_dir: Path,
+        *,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        screenshot_list = "\n".join(f"- {path}" for path in screenshot_paths) or "- None"
+        prompt = dedent(
+            f"""
+            You are {self.agent_id}, a QA Agent in a Codex CLI multi-agent development workflow.
+            Review the completed app using the approved contract, generated app listing,
+            mechanical QA report, and attached screenshots when present.
+
+            Do not modify files. Do not ask follow-up questions.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Generated app listing:
+            {generated_app_listing}
+
+            Mechanical QA report:
+            {qa_report}
+
+            Screenshot paths attached to this review:
+            {screenshot_list}
+
+            Review duties:
+            - Compare the implementation evidence against the acceptance criteria.
+            - Inspect attached screenshots for obvious visual breakage, blank pages,
+              broken layout, or missing primary UI.
+            - Treat mechanical QA FAIL as a blocking issue.
+            - Treat mechanical QA SKIP as a risk, not automatically a failure.
+            - For browser/game apps, verify whether the evidence supports keyboard
+              handling and visible gameplay enough for this run.
+            - Avoid inventing requirements outside the approved contract.
+
+            Output format:
+            QA_STATUS: PASS or FAIL
+            Suspected owners:
+            - code_1, code_2, integrator, unknown, or "None"
+            Affected paths:
+            - relative/path.ext, or "None"
+            Summary: one short paragraph
+            Findings:
+            - bullet list of concrete issues or "None"
+            Evidence:
+            - bullet list referencing report sections, screenshot names, or files
+            Recommended fixes:
+            - bullet list, or "None"
+            """
+        ).strip()
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_review",
+            session_id=session_id,
+            sandbox="read-only",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            image_paths=screenshot_paths,
         )
 
 
@@ -222,10 +785,14 @@ class DeveloperAgent:
         codex_home: str | None = None,
         logs_dir: Path | None = None,
         timeout: int = 900,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
+        self.model = model
+        self.reasoning_effort = reasoning_effort
 
     def create_app(self, user_request: str, plan_markdown: str, app_dir: Path) -> str:
         return self.create_app_result(user_request, plan_markdown, app_dir).stdout
@@ -279,6 +846,9 @@ class DeveloperAgent:
             label="developer_initial",
             session_id=session_id,
             sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
         )
 
     def fix_app(
@@ -347,4 +917,7 @@ class DeveloperAgent:
             label=f"developer_fix_{iteration:02d}",
             session_id=session_id,
             sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
         )

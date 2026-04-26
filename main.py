@@ -31,6 +31,15 @@ def parse_args() -> argparse.Namespace:
         help="CODEX_HOME path for Developer Agent. Defaults to the current environment.",
     )
     parser.add_argument(
+        "--model",
+        help="Codex model to pass to Planner and Developer agents.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help="Codex reasoning effort passed as model_reasoning_effort.",
+    )
+    parser.add_argument(
         "--max-fix-iterations",
         type=int,
         default=1,
@@ -61,8 +70,18 @@ def main() -> int:
     print(f"Run directory: {run_dir}")
     print("Running Planner Agent...")
 
-    planner = PlannerAgent(codex_home=args.planner_codex_home, logs_dir=logs_dir)
-    developer = DeveloperAgent(codex_home=args.developer_codex_home, logs_dir=logs_dir)
+    planner = PlannerAgent(
+        codex_home=args.planner_codex_home,
+        logs_dir=logs_dir,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+    )
+    developer = DeveloperAgent(
+        codex_home=args.developer_codex_home,
+        logs_dir=logs_dir,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+    )
 
     try:
         plan_markdown = planner.create_plan(user_request, run_dir)

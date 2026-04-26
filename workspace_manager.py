@@ -31,6 +31,14 @@ def create_generated_app_dir(run_dir: Path) -> Path:
     return app_dir
 
 
+def create_contract_dir(run_dir: Path) -> Path:
+    """Create the contract artifact directory for a run."""
+
+    contract_dir = Path(run_dir) / "contract"
+    contract_dir.mkdir(parents=True, exist_ok=True)
+    return contract_dir
+
+
 def create_logs_dir(run_dir: Path) -> Path:
     """Create the Codex call logs directory for a run."""
 

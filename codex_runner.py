@@ -37,6 +37,10 @@ class CodexResult:
     returncode: int
     session_id: str | None
     resumed_session_id: str | None
+    model: str | None
+    reasoning_effort: str | None
+    effective_approval: str | None
+    effective_sandbox: str | None
 
 
 def run_codex(
@@ -46,6 +50,9 @@ def run_codex(
     timeout: int = 600,
     logs_dir: Path | None = None,
     label: str = "codex",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
 ) -> str:
     """Run Codex in a specific directory and return stdout."""
 
@@ -56,6 +63,9 @@ def run_codex(
         timeout=timeout,
         logs_dir=logs_dir,
         label=label,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        image_paths=image_paths,
     ).stdout
 
 
@@ -68,6 +78,10 @@ def run_codex_result(
     label: str = "codex",
     session_id: str | None = None,
     sandbox: str = "workspace-write",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
+    require_writable: bool = False,
 ) -> CodexResult:
     """Run Codex CLI and return stdout, stderr, and the parsed session id.
 
@@ -81,7 +95,9 @@ def run_codex_result(
     if not workdir.exists():
         raise FileNotFoundError(f"Work directory does not exist: {workdir}")
 
-    env = os.environ.copy()
+    stripped_env_names = _codex_env_names_to_strip(os.environ)
+    windows_sandbox = os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX", "").strip()
+    env = _clean_child_codex_env(os.environ)
     if codex_home:
         env["CODEX_HOME"] = codex_home
 
@@ -89,7 +105,16 @@ def run_codex_result(
     _write_log(logs_dir, f"{call_id}_prompt.txt", prompt)
 
     codex_executable = _resolve_codex_executable()
-    command = _build_command(codex_executable, session_id=session_id, sandbox=sandbox)
+    image_paths = [Path(path) for path in (image_paths or [])]
+    command = _build_command(
+        codex_executable,
+        session_id=session_id,
+        sandbox=sandbox,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        image_paths=image_paths,
+        windows_sandbox=windows_sandbox,
+    )
     try:
         result = subprocess.run(
             command,
@@ -128,6 +153,14 @@ def run_codex_result(
                 command=command,
                 resumed_session_id=session_id,
                 parsed_session_id=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                image_paths=image_paths,
+                requested_sandbox=sandbox,
+                effective_approval=None,
+                effective_sandbox=None,
+                stripped_env_names=stripped_env_names,
+                windows_sandbox=windows_sandbox,
             ),
         )
         raise CodexExecutionError(message, stdout=stdout, stderr=stderr) from exc
@@ -135,6 +168,8 @@ def run_codex_result(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     parsed_session_id = _parse_session_id(stderr) or session_id
+    effective_approval = _parse_header_value(stderr, "approval")
+    effective_sandbox = _parse_header_value(stderr, "sandbox")
     _write_log(logs_dir, f"{call_id}_stdout.txt", stdout)
     _write_log(logs_dir, f"{call_id}_stderr.txt", stderr)
     _write_log(
@@ -149,6 +184,14 @@ def run_codex_result(
             command=command,
             resumed_session_id=session_id,
             parsed_session_id=parsed_session_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            image_paths=image_paths,
+            requested_sandbox=sandbox,
+            effective_approval=effective_approval,
+            effective_sandbox=effective_sandbox,
+            stripped_env_names=stripped_env_names,
+            windows_sandbox=windows_sandbox,
         ),
     )
 
@@ -164,12 +207,29 @@ def run_codex_result(
             returncode=result.returncode,
         )
 
+    if require_writable and effective_sandbox == "read-only":
+        message = (
+            "Codex CLI started with an effective read-only sandbox, but this "
+            "agent step requires file writes. See the run logs for the command "
+            "and stderr header."
+        )
+        raise CodexExecutionError(
+            message,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=result.returncode,
+        )
+
     return CodexResult(
         stdout=stdout.strip(),
         stderr=stderr,
         returncode=result.returncode,
         session_id=parsed_session_id,
         resumed_session_id=session_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        effective_approval=effective_approval,
+        effective_sandbox=effective_sandbox,
     )
 
 
@@ -202,13 +262,60 @@ def _resolve_codex_executable() -> str:
     return "codex"
 
 
-def _build_command(codex_executable: str, *, session_id: str | None, sandbox: str) -> list[str]:
+def _codex_env_names_to_strip(source_env: os._Environ[str]) -> list[str]:
+    names = []
+    for name in list(source_env):
+        if name.startswith("CODEX_INTERNAL_"):
+            names.append(name)
+    for name in [
+        "CODEX_THREAD_ID",
+        "CODEX_SANDBOX",
+        "CODEX_SANDBOX_MODE",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CODEX_APPROVAL_POLICY",
+    ]:
+        if name in source_env:
+            names.append(name)
+    return sorted(set(names))
+
+
+def _clean_child_codex_env(source_env: os._Environ[str]) -> dict[str, str]:
+    """Remove parent Codex runtime markers before launching nested Codex CLI."""
+
+    env = dict(source_env)
+    for name in _codex_env_names_to_strip(source_env):
+        env.pop(name, None)
+    return env
+
+
+def _build_command(
+    codex_executable: str,
+    *,
+    session_id: str | None,
+    sandbox: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    image_paths: list[Path],
+    windows_sandbox: str,
+) -> list[str]:
+    options = ["--skip-git-repo-check"]
+    if sandbox != "read-only":
+        options.append("--full-auto")
+    if os.name == "nt" and windows_sandbox:
+        options.extend(["-c", f'windows.sandbox="{windows_sandbox}"'])
+    if model:
+        options.extend(["--model", model])
+    if reasoning_effort:
+        options.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+    for image_path in image_paths:
+        options.extend(["--image", str(image_path)])
+
     if session_id:
         return [
             codex_executable,
             "exec",
             "resume",
-            "--skip-git-repo-check",
+            *options,
             session_id,
             "-",
         ]
@@ -216,7 +323,7 @@ def _build_command(codex_executable: str, *, session_id: str | None, sandbox: st
     return [
         codex_executable,
         "exec",
-        "--skip-git-repo-check",
+        *options,
         "--sandbox",
         sandbox,
         "--color",
@@ -230,6 +337,14 @@ def _parse_session_id(stderr: str) -> str | None:
     if not match:
         return None
     return match.group(1)
+
+
+def _parse_header_value(stderr: str, name: str) -> str | None:
+    pattern = rf"(?im)^\s*{re.escape(name)}:\s*(.+?)\s*$"
+    match = re.search(pattern, stderr)
+    if not match:
+        return None
+    return match.group(1).strip()
 
 
 def _safe_process_text(value: str | bytes | None) -> str:
@@ -250,6 +365,14 @@ def _meta_text(
     command: list[str],
     resumed_session_id: str | None,
     parsed_session_id: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    image_paths: list[Path],
+    requested_sandbox: str,
+    effective_approval: str | None,
+    effective_sandbox: str | None,
+    stripped_env_names: list[str],
+    windows_sandbox: str,
 ) -> str:
     codex_home_value = codex_home if codex_home else "(default)"
     redacted_command = " ".join("<codex>" if part == codex_executable else part for part in command)
@@ -262,6 +385,14 @@ def _meta_text(
             f"resolved_codex_executable: {codex_executable}",
             f"command: {redacted_command}",
             "prompt_transport: stdin",
+            f"model: {model or '(configured default)'}",
+            f"reasoning_effort: {reasoning_effort or '(configured default)'}",
+            f"requested_sandbox: {requested_sandbox}",
+            f"effective_approval: {effective_approval or '(not parsed)'}",
+            f"effective_sandbox: {effective_sandbox or '(not parsed)'}",
+            f"windows_sandbox_config: {windows_sandbox or '(not set)'}",
+            f"stripped_codex_env: {', '.join(stripped_env_names) or '(none)'}",
+            f"image_paths: {', '.join(str(path) for path in image_paths) or '(none)'}",
             f"resumed_session_id: {resumed_session_id}",
             f"parsed_session_id: {parsed_session_id}",
             "",
