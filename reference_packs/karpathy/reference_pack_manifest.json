@@ -1,0 +1,29 @@
+{
+  "id": "karpathy-curated",
+  "version": 1,
+  "source": {
+    "repo": "https://github.com/forrestchang/andrej-karpathy-skills",
+    "commit": "2c606141936f1eeef17fa3043a72095b4765b9c2",
+    "local_cache": "reference_packs/karpathy_src",
+    "imported_on": "2026-04-27"
+  },
+  "policy": {
+    "curated_docs_only": true,
+    "do_not_install_plugin": true,
+    "safe_to_attach_to_agent_prompt": true
+  },
+  "default_role_files": {
+    "code_agent": "reference_packs/karpathy/code_agent.md",
+    "integrator": "reference_packs/karpathy/integrator.md"
+  },
+  "source_inspiration": {
+    "code_agent": [
+      "CLAUDE.md",
+      "skills/karpathy-guidelines/SKILL.md"
+    ],
+    "integrator": [
+      "CLAUDE.md",
+      "skills/karpathy-guidelines/SKILL.md"
+    ]
+  }
+}

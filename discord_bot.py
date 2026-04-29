@@ -38,6 +38,9 @@ class CodexDevBot(commands.Bot):
             executable_qa_enabled=config.executable_qa_enabled,
             executable_qa_timeout_seconds=config.executable_qa_timeout_seconds,
             executable_qa_allow_local_commands=config.executable_qa_allow_local_commands,
+            routing_mode=config.routing_mode,
+            reference_pack_enabled=config.reference_pack_enabled,
+            agent_references=config.agent_reference_profiles,
         )
 
     async def setup_hook(self) -> None:

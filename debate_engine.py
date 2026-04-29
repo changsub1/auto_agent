@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,11 @@ from parallel_workflow import (
     seed_merged_app_from_owned_paths,
 )
 from qa import QAResult, combine_mechanical_qa_results, run_python_syntax_check
+from reference_packs import DEFAULT_REFERENCE_PROFILES, load_profile_reference_text, prepare_reference_profiles
+from routing import RoutingDecision, decide_route, normalize_routing_mode
 from state_store import StateStore
 from workspace_manager import (
+    create_generated_app_dir,
     create_logs_dir,
     create_run_dir,
     normalize_windows_command_files,
@@ -67,6 +71,9 @@ class DebateEngine:
         executable_qa_enabled: bool = True,
         executable_qa_timeout_seconds: int = 90,
         executable_qa_allow_local_commands: bool = False,
+        routing_mode: str = "balanced",
+        reference_pack_enabled: bool = True,
+        agent_references: dict[str, str | None] | None = None,
     ) -> None:
         self.project_root = Path(project_root)
         self.reporter = reporter
@@ -79,7 +86,7 @@ class DebateEngine:
         self.code_agent_codex_homes = code_agent_codex_homes or [developer_codex_home]
         self.code_agent_count = max(1, code_agent_count)
         self.qa_agent_codex_homes = qa_agent_codex_homes or [self.integrator_codex_home]
-        self.qa_agent_count = max(1, qa_agent_count)
+        self.qa_agent_count = max(0, qa_agent_count)
         self.codex_model = codex_model
         self.codex_reasoning_effort = codex_reasoning_effort
         self.max_fix_iterations = max_fix_iterations
@@ -87,6 +94,11 @@ class DebateEngine:
         self.executable_qa_enabled = executable_qa_enabled
         self.executable_qa_timeout_seconds = executable_qa_timeout_seconds
         self.executable_qa_allow_local_commands = executable_qa_allow_local_commands
+        self.routing_mode = normalize_routing_mode(routing_mode)
+        self.reference_pack_enabled = reference_pack_enabled
+        self.agent_references = dict(DEFAULT_REFERENCE_PROFILES)
+        if agent_references is not None:
+            self.agent_references.update(agent_references)
         self.run_dirs: dict[str, Path] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
@@ -101,6 +113,12 @@ class DebateEngine:
     ) -> tuple[str, Path]:
         run_dir = create_run_dir(self.project_root)
         create_logs_dir(run_dir)
+        route = decide_route(
+            request,
+            requested_mode=self.routing_mode,
+            max_code_agent_count=self.code_agent_count,
+            max_qa_agent_count=self.qa_agent_count,
+        )
         store = StateStore(run_dir)
         store.initialize(
             user_request=request,
@@ -111,14 +129,22 @@ class DebateEngine:
                 "request_interaction_id": str(request_interaction_id) if request_interaction_id else None,
             },
             max_fix_iterations=self.max_fix_iterations,
-            code_agent_count=self.code_agent_count,
-            qa_agent_count=self.qa_agent_count,
+            code_agent_count=route.code_agent_count,
+            qa_agent_count=route.qa_agent_count,
         )
+        self._record_route(store, route)
+        self._prepare_reference_profiles(run_dir, store)
         self._register_run(run_dir)
 
         await self.reporter.send_status(
             channel,
-            f"Started development run `{run_dir.name}`.\nRun directory: `{run_dir}`",
+            "\n".join(
+                [
+                    f"Started development run `{run_dir.name}`.",
+                    f"Route: `{route.mode}` ({route.reason})",
+                    f"Run directory: `{run_dir}`",
+                ]
+            ),
         )
         await self.run_planning_round(run_dir.name, channel=channel, requester_id=requester_id)
         return run_dir.name, run_dir
@@ -137,6 +163,7 @@ class DebateEngine:
             store = StateStore(run_dir)
             state = store.load()
             user_request = state["user_request"]
+            route = self._route_for_state(state)
             logs_dir = create_logs_dir(run_dir)
             planning_dir = run_dir / "planning"
             planning_dir.mkdir(parents=True, exist_ok=True)
@@ -146,13 +173,17 @@ class DebateEngine:
                 store.add_approval(action="revision_requested", user_id=requester_id, feedback=user_feedback)
                 store.append_transcript("User Revision Feedback", user_feedback)
 
-            await self.reporter.send_status(channel, f"`{run_id}` Planning: Planner A is drafting.")
+            await self.reporter.send_status(
+                channel,
+                f"`{run_id}` Planning: Planner A is drafting. Route: `{route.mode}`.",
+            )
             planner_a = PlannerAgentA(
                 codex_home=self.planner_a_codex_home,
                 logs_dir=logs_dir,
                 timeout=self.codex_timeout_seconds,
                 model=self.codex_model,
                 reasoning_effort=self.codex_reasoning_effort,
+                reference_markdown=self._reference_for_role(run_dir, "planner_a"),
             )
             planner_b = PlannerAgentB(
                 codex_home=self.planner_b_codex_home,
@@ -160,6 +191,7 @@ class DebateEngine:
                 timeout=self.codex_timeout_seconds,
                 model=self.codex_model,
                 reasoning_effort=self.codex_reasoning_effort,
+                reference_markdown=self._reference_for_role(run_dir, "planner_b"),
             )
 
             previous_final = self._read_artifact_if_present(store, "final_plan")
@@ -212,62 +244,77 @@ class DebateEngine:
                 self._agent_session_message(run_id, "Planner A", draft_result),
             )
 
-            await self.reporter.send_status(channel, f"`{run_id}` Planning: Planner B is reviewing.")
-            planner_b_session = store.get_agent_session_id("planner_b")
-            review_result = await self._call_codex(
-                lambda session_id: planner_b.review_plan(
-                    user_request,
-                    draft_result.stdout,
-                    run_dir,
-                    user_feedback=user_feedback,
-                    session_id=session_id,
-                ),
-                session_id=planner_b_session,
-            )
-            review_path = store.write_artifact(
-                "planning/02_planner_b_review.md",
-                review_result.stdout,
-                artifact_name="planner_b_review",
-            )
-            store.update_agent_session(
-                "planner_b",
-                session_id=review_result.session_id,
-                codex_home=self.planner_b_codex_home,
-                model=review_result.model,
-                reasoning_effort=review_result.reasoning_effort,
-                last_step="review",
-            )
-            store.append_event("agent_output", "planner_b", "Planner B review created", {"path": store.to_relative(review_path)})
-            store.append_transcript("Planner B Review", review_result.stdout)
-            await self.reporter.send_markdown(
-                channel,
-                title=f"{run_id} Planner B Review",
-                content=review_result.stdout,
-                artifact_path=review_path,
-            )
-            await self.reporter.send_status(
-                channel,
-                self._agent_session_message(run_id, "Planner B", review_result),
-            )
+            review_text = f"(Planner B review skipped by `{route.mode}` route.)"
+            if route.planner_count >= 2:
+                await self.reporter.send_status(channel, f"`{run_id}` Planning: Planner B is reviewing.")
+                planner_b_session = store.get_agent_session_id("planner_b")
+                review_result = await self._call_codex(
+                    lambda session_id: planner_b.review_plan(
+                        user_request,
+                        draft_result.stdout,
+                        run_dir,
+                        user_feedback=user_feedback,
+                        session_id=session_id,
+                    ),
+                    session_id=planner_b_session,
+                )
+                review_text = review_result.stdout
+                review_path = store.write_artifact(
+                    "planning/02_planner_b_review.md",
+                    review_text,
+                    artifact_name="planner_b_review",
+                )
+                store.update_agent_session(
+                    "planner_b",
+                    session_id=review_result.session_id,
+                    codex_home=self.planner_b_codex_home,
+                    model=review_result.model,
+                    reasoning_effort=review_result.reasoning_effort,
+                    last_step="review",
+                )
+                store.append_event("agent_output", "planner_b", "Planner B review created", {"path": store.to_relative(review_path)})
+                store.append_transcript("Planner B Review", review_text)
+                await self.reporter.send_markdown(
+                    channel,
+                    title=f"{run_id} Planner B Review",
+                    content=review_text,
+                    artifact_path=review_path,
+                )
+                await self.reporter.send_status(
+                    channel,
+                    self._agent_session_message(run_id, "Planner B", review_result),
+                )
+            else:
+                review_path = store.write_artifact(
+                    "planning/02_planner_b_review.md",
+                    review_text,
+                    artifact_name="planner_b_review",
+                )
+                store.append_event("agent_output", "planner_b", "Planner B skipped", {"path": store.to_relative(review_path)})
+                store.append_transcript("Planner B Review", review_text)
 
-            await self.reporter.send_status(channel, f"`{run_id}` Planning: Planner A is preparing the final plan.")
-            final_result = await self._call_codex(
-                lambda session_id: planner_a.revise_final_plan(
-                    user_request,
-                    draft_result.stdout,
-                    review_result.stdout,
-                    run_dir,
-                    user_feedback=user_feedback,
-                    session_id=session_id,
-                ),
-                session_id=store.get_agent_session_id("planner_a"),
-            )
+            final_result = draft_result
+            final_text = draft_result.stdout
+            if route.planner_count >= 2:
+                await self.reporter.send_status(channel, f"`{run_id}` Planning: Planner A is preparing the final plan.")
+                final_result = await self._call_codex(
+                    lambda session_id: planner_a.revise_final_plan(
+                        user_request,
+                        draft_result.stdout,
+                        review_text,
+                        run_dir,
+                        user_feedback=user_feedback,
+                        session_id=session_id,
+                    ),
+                    session_id=store.get_agent_session_id("planner_a"),
+                )
+                final_text = final_result.stdout
             final_path = store.write_artifact(
                 "planning/03_final_plan.md",
-                final_result.stdout,
+                final_text,
                 artifact_name="final_plan",
             )
-            save_text(run_dir / "plan.md", final_result.stdout)
+            save_text(run_dir / "plan.md", final_text)
             store.record_artifact("plan_md", run_dir / "plan.md")
             store.update_agent_session(
                 "planner_a",
@@ -278,11 +325,11 @@ class DebateEngine:
                 last_step="final_plan",
             )
             store.append_event("agent_output", "planner_a", "Final plan created", {"path": store.to_relative(final_path)})
-            store.append_transcript("Final Plan", final_result.stdout)
+            store.append_transcript("Final Plan", final_text)
             await self.reporter.send_markdown(
                 channel,
                 title=f"{run_id} Final Plan",
-                content=final_result.stdout,
+                content=final_text,
                 artifact_path=final_path,
             )
             await self.reporter.send_status(
@@ -290,71 +337,74 @@ class DebateEngine:
                 self._agent_session_message(run_id, "Planner A", final_result),
             )
 
-            store.set_status("contract_running")
-            await self.reporter.send_status(channel, f"`{run_id}` Architecture: Architect Agent is creating the contract bundle.")
-            contract_dir = create_contract_dir(run_dir)
-            architect = ArchitectAgent(
-                codex_home=self.architect_codex_home,
-                logs_dir=logs_dir,
-                timeout=self.codex_timeout_seconds,
-                model=self.codex_model,
-                reasoning_effort=self.codex_reasoning_effort,
-            )
-            try:
-                architect_result = await self._call_codex(
-                    lambda session_id: architect.create_contract_bundle_result(
-                        user_request,
-                        draft_result.stdout,
-                        review_result.stdout,
-                        final_result.stdout,
-                        contract_dir,
-                        session_id=session_id,
-                    ),
-                    session_id=store.get_agent_session_id("architect"),
+            approval_target = "final plan"
+            if route.uses_contract:
+                store.set_status("contract_running")
+                await self.reporter.send_status(channel, f"`{run_id}` Architecture: Architect Agent is creating the contract bundle.")
+                contract_dir = create_contract_dir(run_dir)
+                architect = ArchitectAgent(
+                    codex_home=self.architect_codex_home,
+                    logs_dir=logs_dir,
+                    timeout=self.codex_timeout_seconds,
+                    model=self.codex_model,
+                    reasoning_effort=self.codex_reasoning_effort,
                 )
-            except CodexExecutionError as exc:
-                store.set_status("contract_failed")
-                store.append_event("codex_error", "architect", str(exc), {"stderr": exc.stderr})
-                await self.reporter.send_status(channel, f"`{run_id}` Architect Agent failed: `{exc}`")
-                return
-            contract_paths = normalize_contract_bundle(contract_dir, user_request, final_result.stdout)
-            store.record_artifact("contract_dir", contract_dir)
-            for path in contract_paths:
-                store.record_artifact(f"contract_{path.stem}", path)
-            store.update_agent_session(
-                "architect",
-                session_id=architect_result.session_id,
-                codex_home=self.architect_codex_home,
-                model=architect_result.model,
-                reasoning_effort=architect_result.reasoning_effort,
-                last_step="contract_bundle",
-            )
-            store.append_event(
-                "agent_output",
-                "architect",
-                "Contract bundle created",
-                {"path": store.to_relative(contract_dir), "files": [store.to_relative(path) for path in contract_paths]},
-            )
-            store.append_transcript("Architect Contract Summary", architect_result.stdout)
-            await self.reporter.send_markdown(
-                channel,
-                title=f"{run_id} Architect Contract Summary",
-                content=architect_result.stdout,
-                artifact_path=contract_dir / "requirements.md",
-            )
-            await self.reporter.send_status(
-                channel,
-                self._agent_session_message(run_id, "Architect", architect_result),
-            )
-            await self.reporter.send_status(
-                channel,
-                f"`{run_id}` Contract bundle ready: `{contract_dir}`",
-            )
+                try:
+                    architect_result = await self._call_codex(
+                        lambda session_id: architect.create_contract_bundle_result(
+                            user_request,
+                            draft_result.stdout,
+                            review_text,
+                            final_text,
+                            contract_dir,
+                            session_id=session_id,
+                        ),
+                        session_id=store.get_agent_session_id("architect"),
+                    )
+                except CodexExecutionError as exc:
+                    store.set_status("contract_failed")
+                    store.append_event("codex_error", "architect", str(exc), {"stderr": exc.stderr})
+                    await self.reporter.send_status(channel, f"`{run_id}` Architect Agent failed: `{exc}`")
+                    return
+                contract_paths = normalize_contract_bundle(contract_dir, user_request, final_text)
+                store.record_artifact("contract_dir", contract_dir)
+                for path in contract_paths:
+                    store.record_artifact(f"contract_{path.stem}", path)
+                store.update_agent_session(
+                    "architect",
+                    session_id=architect_result.session_id,
+                    codex_home=self.architect_codex_home,
+                    model=architect_result.model,
+                    reasoning_effort=architect_result.reasoning_effort,
+                    last_step="contract_bundle",
+                )
+                store.append_event(
+                    "agent_output",
+                    "architect",
+                    "Contract bundle created",
+                    {"path": store.to_relative(contract_dir), "files": [store.to_relative(path) for path in contract_paths]},
+                )
+                store.append_transcript("Architect Contract Summary", architect_result.stdout)
+                await self.reporter.send_markdown(
+                    channel,
+                    title=f"{run_id} Architect Contract Summary",
+                    content=architect_result.stdout,
+                    artifact_path=contract_dir / "requirements.md",
+                )
+                await self.reporter.send_status(
+                    channel,
+                    self._agent_session_message(run_id, "Architect", architect_result),
+                )
+                await self.reporter.send_status(
+                    channel,
+                    f"`{run_id}` Contract bundle ready: `{contract_dir}`",
+                )
+                approval_target = "contract bundle"
 
-            store.set_status("awaiting_contract_approval")
+            store.set_status("awaiting_contract_approval" if route.uses_contract else "awaiting_plan_approval")
             view = PlanApprovalView(engine=self, run_id=run_id, requester_id=requester_id)
             approval_message = await channel.send(
-                f"<@{requester_id}> Review the contract bundle for run `{run_id}`.",
+                f"<@{requester_id}> Review the {approval_target} for run `{run_id}`. Route: `{route.mode}`.",
                 view=view,
             )
             store.update_discord(approval_message_id=str(approval_message.id))
@@ -369,11 +419,12 @@ class DebateEngine:
         lock = self._lock(run_id)
         async with lock:
             store = StateStore(run_dir)
+            route = self._route_for_state(store.load())
             store.add_approval(action="approved", user_id=interaction.user.id)
             store.set_status("development_running")
             await self.reporter.send_status(
                 channel,
-                f"`{run_id}` Contract approved. Starting scaffold, parallel code agents, and integration.",
+                f"`{run_id}` Plan approved. Starting `{route.mode}` development route.",
             )
 
             try:
@@ -385,9 +436,10 @@ class DebateEngine:
                 return
 
             store.set_status("awaiting_qa_approval")
+            final_agent_label = "Integrator" if route.uses_integrator else "Code Agent"
             await self.reporter.send_status(
                 channel,
-                self._agent_session_message(run_id, "Integrator", developer_result),
+                self._agent_session_message(run_id, final_agent_label, developer_result),
             )
             await self._publish_qa_review(
                 channel,
@@ -482,6 +534,9 @@ class DebateEngine:
         final_plan = self._read_artifact_if_present(store, "final_plan")
         if not final_plan:
             raise RuntimeError("Final plan artifact is missing.")
+        route = self._route_for_state(state)
+        if not route.uses_integrator:
+            return await self._run_single_code_development(run_dir, route)
 
         logs_dir = create_logs_dir(run_dir)
         contract_dir = run_dir / state.get("artifacts", {}).get("contract_dir", "contract")
@@ -526,7 +581,7 @@ class DebateEngine:
         outputs_dir = create_agent_outputs_dir(run_dir)
         assignments = assign_code_agent_tasks(
             tasks,
-            code_agent_count=self.code_agent_count,
+            code_agent_count=route.code_agent_count,
             code_agent_codex_homes=self.code_agent_codex_homes,
             scaffold_dir=scaffold_dir,
             workspaces_dir=workspaces_dir,
@@ -605,6 +660,7 @@ class DebateEngine:
             timeout=self.codex_timeout_seconds,
             model=self.codex_model,
             reasoning_effort=self.codex_reasoning_effort,
+            reference_markdown=self._reference_for_role(run_dir, "integrator"),
         )
         integration_result = await self._call_codex(
             lambda session_id: integrator.integrate_result(
@@ -697,9 +753,135 @@ class DebateEngine:
         )
         return qa_result, generated_app_dir, final_agent_result
 
+    async def _run_single_code_development(
+        self,
+        run_dir: Path,
+        route: RoutingDecision,
+    ) -> tuple[QAResult, Path, CodexResult]:
+        store = StateStore(run_dir)
+        state = store.load()
+        user_request = state["user_request"]
+        final_plan = self._read_artifact_if_present(store, "final_plan")
+        logs_dir = create_logs_dir(run_dir)
+        generated_app_dir = create_generated_app_dir(run_dir)
+        outputs_dir = create_agent_outputs_dir(run_dir)
+        assignment = self._single_code_assignment(generated_app_dir)
+        assignment_summary = render_assignment_summary([assignment])
+
+        store.record_artifact("generated_app", generated_app_dir)
+        store.record_artifact("agent_outputs", outputs_dir)
+        store.write_artifact(
+            "agent_outputs/assignment_summary.md",
+            assignment_summary,
+            artifact_name="assignment_summary",
+        )
+        store.append_event(
+            "code_agents_started",
+            "system",
+            "Single code agent started",
+            {"agents": [assignment.agent_id], "route": route.mode},
+        )
+
+        store.set_status("code_agent_running")
+        code_result = await self._run_code_agent_assignment(
+            user_request=user_request,
+            contract_bundle=self._single_code_context(final_plan, route),
+            assignment=assignment,
+            logs_dir=logs_dir,
+            store=store,
+        )
+        output_path = store.write_artifact(
+            "agent_outputs/code_1_summary.md",
+            code_result.stdout,
+            artifact_name="code_1_summary",
+        )
+        store.update_agent_session(
+            "code_1",
+            session_id=code_result.session_id,
+            codex_home=assignment.codex_home,
+            model=code_result.model,
+            reasoning_effort=code_result.reasoning_effort,
+            last_step="implement_tasks",
+        )
+        store.append_event(
+            "agent_output",
+            "code_1",
+            "Code agent completed assigned tasks",
+            {"path": store.to_relative(output_path), **self._session_event_data(code_result)},
+        )
+        store.append_transcript("code_1 Output", code_result.stdout)
+        normalize_windows_command_files(generated_app_dir)
+
+        fix_iterations_used = 0
+        final_agent_result = code_result
+        qa_result = await self._run_qa_cycle(
+            run_dir,
+            generated_app_dir,
+            "single-agent mechanical QA",
+            fix_iterations_used,
+        )
+        while not qa_result.ok and fix_iterations_used < self.max_fix_iterations:
+            fix_iterations_used += 1
+            fix_result = await self._run_code_agent_fix(
+                user_request=user_request,
+                contract_bundle=self._single_code_context(final_plan, route),
+                assignment=assignment,
+                feedback=qa_result.error_log or qa_result.report_markdown,
+                iteration=fix_iterations_used,
+                logs_dir=logs_dir,
+                store=store,
+            )
+            output_path = store.write_artifact(
+                f"agent_outputs/code_1_fix_{fix_iterations_used:02d}.md",
+                fix_result.stdout,
+                artifact_name=f"code_1_fix_{fix_iterations_used:02d}",
+            )
+            store.update_agent_session(
+                "code_1",
+                session_id=fix_result.session_id,
+                codex_home=assignment.codex_home,
+                model=fix_result.model,
+                reasoning_effort=fix_result.reasoning_effort,
+                last_step=f"fix_{fix_iterations_used}",
+            )
+            store.append_event(
+                "agent_output",
+                "code_1",
+                "Code agent fix completed",
+                {"path": store.to_relative(output_path), **self._session_event_data(fix_result)},
+            )
+            store.append_transcript(f"code_1 Fix {fix_iterations_used}", fix_result.stdout)
+            normalize_windows_command_files(generated_app_dir)
+            qa_result = await self._run_qa_cycle(
+                run_dir,
+                generated_app_dir,
+                f"single-agent mechanical QA after fix {fix_iterations_used}",
+                fix_iterations_used,
+            )
+            final_agent_result = fix_result
+
+        store.append_transcript("QA Report", qa_result.report_markdown)
+        store.append_event(
+            "qa_completed",
+            "qa",
+            "Mechanical QA completed",
+            {
+                "ok": qa_result.ok,
+                "checked_files": [path.as_posix() for path in qa_result.checked_files],
+                "executable_status": qa_result.executable_status,
+                "executable_app_type": qa_result.executable_app_type,
+                "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+            },
+        )
+        return qa_result, generated_app_dir, final_agent_result
+
     async def _run_qa_revision(self, run_dir: Path, feedback: str) -> tuple[QAResult, Path, CodexResult]:
         store = StateStore(run_dir)
         state = store.load()
+        route = self._route_for_state(state)
+        if not route.uses_integrator:
+            return await self._run_single_qa_revision(run_dir, feedback, route)
+
         user_request = state["user_request"]
         logs_dir = create_logs_dir(run_dir)
         generated_app_dir = run_dir / state.get("artifacts", {}).get("generated_app", "generated_app")
@@ -770,6 +952,89 @@ class DebateEngine:
         )
         return qa_result, generated_app_dir, fix_result
 
+    async def _run_single_qa_revision(
+        self,
+        run_dir: Path,
+        feedback: str,
+        route: RoutingDecision,
+    ) -> tuple[QAResult, Path, CodexResult]:
+        store = StateStore(run_dir)
+        state = store.load()
+        user_request = state["user_request"]
+        logs_dir = create_logs_dir(run_dir)
+        generated_app_dir = run_dir / state.get("artifacts", {}).get("generated_app", "generated_app")
+        if not generated_app_dir.exists():
+            raise FileNotFoundError(f"Generated app directory not found: {generated_app_dir}")
+
+        final_plan = self._read_artifact_if_present(store, "final_plan")
+        latest_qa = self._read_artifact_if_present(store, "qa_report")
+        revision_count = sum(
+            1
+            for item in state.get("approval_history", [])
+            if item.get("action") == "qa_revision_requested"
+        )
+        qa_feedback = "\n\n".join(
+            part
+            for part in [
+                "User QA feedback:",
+                feedback,
+                "Latest QA report:",
+                latest_qa,
+            ]
+            if part
+        )
+        assignment = self._single_code_assignment(generated_app_dir)
+        fix_result = await self._run_code_agent_fix(
+            user_request=user_request,
+            contract_bundle=self._single_code_context(final_plan, route),
+            assignment=assignment,
+            feedback=qa_feedback,
+            iteration=revision_count,
+            logs_dir=logs_dir,
+            store=store,
+        )
+        output_path = store.write_artifact(
+            f"agent_outputs/code_1_user_fix_{revision_count:02d}.md",
+            fix_result.stdout,
+            artifact_name=f"code_1_user_fix_{revision_count:02d}",
+        )
+        store.update_agent_session(
+            "code_1",
+            session_id=fix_result.session_id,
+            codex_home=assignment.codex_home,
+            model=fix_result.model,
+            reasoning_effort=fix_result.reasoning_effort,
+            last_step=f"user_fix_{revision_count}",
+        )
+        store.append_event(
+            "agent_output",
+            "code_1",
+            "Code agent user-requested fix completed",
+            {"path": store.to_relative(output_path), **self._session_event_data(fix_result)},
+        )
+        store.append_transcript(f"code_1 User Fix {revision_count}", fix_result.stdout)
+        normalize_windows_command_files(generated_app_dir)
+
+        qa_result = await self._run_qa_cycle(
+            run_dir,
+            generated_app_dir,
+            f"mechanical QA after user revision {revision_count}",
+            100 + revision_count,
+        )
+        store.append_transcript("QA Report", qa_result.report_markdown)
+        store.append_event(
+            "qa_completed",
+            "qa",
+            "Mechanical QA completed after user revision",
+            {
+                "ok": qa_result.ok,
+                "executable_status": qa_result.executable_status,
+                "executable_app_type": qa_result.executable_app_type,
+                "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+            },
+        )
+        return qa_result, generated_app_dir, fix_result
+
     async def _run_code_agent_assignment(
         self,
         *,
@@ -786,6 +1051,7 @@ class DebateEngine:
             timeout=self.codex_timeout_seconds,
             model=self.codex_model,
             reasoning_effort=self.codex_reasoning_effort,
+            reference_markdown=self._reference_for_role(store.run_dir, "code_agent"),
         )
         return await self._call_codex(
             lambda session_id: code_agent.implement_tasks_result(
@@ -899,6 +1165,7 @@ class DebateEngine:
             timeout=self.codex_timeout_seconds,
             model=self.codex_model,
             reasoning_effort=self.codex_reasoning_effort,
+            reference_markdown=self._reference_for_role(store.run_dir, "code_agent"),
         )
         return await self._call_codex(
             lambda session_id: code_agent.fix_assigned_tasks_result(
@@ -938,6 +1205,7 @@ class DebateEngine:
             timeout=self.codex_timeout_seconds,
             model=self.codex_model,
             reasoning_effort=self.codex_reasoning_effort,
+            reference_markdown=self._reference_for_role(run_dir, "integrator"),
         )
         result = await self._call_codex(
             lambda session_id: integrator.repair_integration_result(
@@ -991,6 +1259,119 @@ class DebateEngine:
                     )
                 )
         return resolved
+
+    def _single_code_assignment(self, generated_app_dir: Path) -> CodeAgentAssignment:
+        return CodeAgentAssignment(
+            agent_id="code_1",
+            codex_home=self.code_agent_codex_homes[0] if self.code_agent_codex_homes else self.developer_codex_home,
+            workspace_dir=generated_app_dir,
+            tasks=[
+                {
+                    "id": "T1",
+                    "title": "Complete application implementation",
+                    "summary": "Implement the approved app end to end in the generated_app directory.",
+                    "dependencies": [],
+                    "owned_paths": ["."],
+                    "allowed_shared_paths": [],
+                    "forbidden_paths": ["contract/", "runs/", "agent_workspaces/", "integration/"],
+                    "interfaces": [
+                        "Create the complete runnable app.",
+                        "Create README.md with setup, run, and test instructions.",
+                        "Create codex_app_manifest.json with at least one safe non-interactive check.",
+                    ],
+                    "acceptance_criteria": [
+                        "The app satisfies the approved plan.",
+                        "The app can be checked by the local QA harness without human input when practical.",
+                    ],
+                }
+            ],
+        )
+
+    def _single_code_context(self, final_plan: str, route: RoutingDecision) -> str:
+        return "\n\n".join(
+            [
+                "# Approved Plan",
+                final_plan.strip() or "(missing final plan)",
+                "# Routing",
+                f"- mode: {route.mode}",
+                f"- reason: {route.reason}",
+                "# App Manifest Requirement",
+                (
+                    "Create `codex_app_manifest.json` in the app root. It must describe safe local "
+                    "setup, test, smoke, server, or browser checks using JSON array commands, not shell strings. "
+                    "Prefer checks that need no network and no human input."
+                ),
+            ]
+        )
+
+    def _route_for_state(self, state: dict[str, Any]) -> RoutingDecision:
+        payload = state.get("routing")
+        if isinstance(payload, dict):
+            return RoutingDecision.from_dict(payload)
+        return decide_route(
+            str(state.get("user_request", "")),
+            requested_mode=self.routing_mode,
+            max_code_agent_count=self.code_agent_count,
+            max_qa_agent_count=self.qa_agent_count,
+        )
+
+    def _record_route(self, store: StateStore, route: RoutingDecision) -> None:
+        payload = route.to_dict()
+        state = store.load()
+        state["routing"] = payload
+        state["parallel"] = {
+            "code_agent_count": route.code_agent_count,
+            "qa_agent_count": route.qa_agent_count,
+        }
+        store.save(state)
+        route_path = store.write_artifact(
+            "route.json",
+            _json_text(payload),
+            artifact_name="route",
+        )
+        store.append_event("routing_decision", "system", f"Selected {route.mode} route", {"path": store.to_relative(route_path), **payload})
+
+    def _prepare_reference_profiles(self, run_dir: Path, store: StateStore) -> None:
+        if not self.reference_pack_enabled:
+            return
+        prepared = prepare_reference_profiles(self.project_root, run_dir, self.agent_references)
+        payload = {
+            "enabled": True,
+            "profiles": prepared.role_profiles,
+            "packs": {
+                pack_id: store.to_relative(pack.run_pack_dir)
+                for pack_id, pack in prepared.packs.items()
+            },
+            "missing_profiles": prepared.missing_profiles,
+        }
+        profiles_path = store.write_artifact(
+            "reference_profiles.json",
+            _json_text(payload),
+            artifact_name="reference_profiles",
+        )
+        for pack_id, pack in prepared.packs.items():
+            store.record_artifact(f"reference_pack_{pack_id}", pack.run_pack_dir)
+            for role, path in pack.role_files.items():
+                store.record_artifact(f"reference_{pack_id}_{role}", path)
+        if prepared.missing_profiles:
+            store.append_event(
+                "reference_profiles_missing",
+                "system",
+                "One or more reference profiles could not be loaded",
+                {"path": store.to_relative(profiles_path), **payload},
+            )
+            return
+        store.append_event(
+            "reference_profiles_prepared",
+            "system",
+            "Reference profiles copied into run",
+            {"path": store.to_relative(profiles_path), **payload},
+        )
+
+    def _reference_for_role(self, run_dir: Path, role: str) -> str:
+        if not self.reference_pack_enabled:
+            return ""
+        return load_profile_reference_text(run_dir, self.agent_references.get(role, ""))
 
     def _resolve_fix_targets(self, assignments: list[CodeAgentAssignment], qa_result: QAResult) -> list[str]:
         valid_code_agents = {assignment.agent_id for assignment in assignments}
@@ -1069,6 +1450,9 @@ class DebateEngine:
             attempt_index,
         )
         self._record_qa_result(store, mechanical_result)
+        route = self._route_for_state(store.load())
+        if route.qa_agent_count <= 0:
+            return mechanical_result
         qa_result = await self._run_llm_qa_agents(
             run_dir=run_dir,
             generated_app_dir=generated_app_dir,
@@ -1088,6 +1472,7 @@ class DebateEngine:
     ) -> QAResult:
         store = StateStore(run_dir)
         state = store.load()
+        route = self._route_for_state(state)
         user_request = state["user_request"]
         contract_dir = run_dir / state.get("artifacts", {}).get("contract_dir", "contract")
         contract_bundle = render_contract_bundle(contract_dir) if contract_dir.exists() else ""
@@ -1106,6 +1491,7 @@ class DebateEngine:
                 timeout=self.codex_timeout_seconds,
                 model=self.codex_model,
                 reasoning_effort=self.codex_reasoning_effort,
+                reference_markdown=self._reference_for_role(run_dir, "qa_agent"),
             )
             result = await self._call_codex(
                 lambda session_id: agent.review_result(
@@ -1121,7 +1507,8 @@ class DebateEngine:
             )
             return agent_id, codex_home, result
 
-        reviews = await asyncio.gather(*[run_one(index) for index in range(1, self.qa_agent_count + 1)])
+        qa_agent_count = route.qa_agent_count
+        reviews = await asyncio.gather(*[run_one(index) for index in range(1, qa_agent_count + 1)])
         review_sections: list[str] = []
         failed_reviews: list[str] = []
         artifact_paths = list(mechanical_result.artifact_paths)
@@ -1179,7 +1566,7 @@ class DebateEngine:
                 "## Codex QA Agent Reviews",
                 "",
                 f"- Status: {status}",
-                f"- QA agent count: {self.qa_agent_count}",
+                f"- QA agent count: {qa_agent_count}",
                 f"- Blocking reviews: {', '.join(failed_reviews) if failed_reviews else 'None'}",
                 "",
                 "\n\n".join(review_sections),
@@ -1392,6 +1779,10 @@ def _merge_unique(values: list[str]) -> list[str]:
         seen.add(normalized)
         result.append(normalized)
     return result
+
+
+def _json_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def _disabled_executable_qa_result(app_dir: Path, qa_dir: Path, attempt_name: str) -> ExecutableQAResult:

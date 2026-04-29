@@ -1,0 +1,46 @@
+{
+  "id": "gstack-curated",
+  "version": 1,
+  "source": {
+    "repo": "https://github.com/garrytan/gstack",
+    "commit": "dde55103fcc42bd446d804ddc15567ced8455ac1",
+    "local_cache": "reference_packs/gstack_src",
+    "imported_on": "2026-04-27"
+  },
+  "policy": {
+    "curated_docs_only": true,
+    "do_not_run_setup": true,
+    "do_not_execute_source_scripts": true,
+    "safe_to_attach_to_agent_prompt": true
+  },
+  "default_role_files": {
+    "planner_a": "reference_packs/gstack/planner_a.md",
+    "planner_b": "reference_packs/gstack/planner_b.md",
+    "code_agent": "reference_packs/gstack/code_agent.md",
+    "integrator": "reference_packs/gstack/integrator.md",
+    "qa_agent": "reference_packs/gstack/qa_agent.md"
+  },
+  "source_inspiration": {
+    "planner_a": [
+      "plan-ceo-review/SKILL.md",
+      "office-hours/SKILL.md"
+    ],
+    "planner_b": [
+      "plan-eng-review/SKILL.md",
+      "review/SKILL.md"
+    ],
+    "code_agent": [
+      "review/SKILL.md",
+      "qa/SKILL.md"
+    ],
+    "integrator": [
+      "plan-eng-review/SKILL.md",
+      "review/SKILL.md"
+    ],
+    "qa_agent": [
+      "qa-only/SKILL.md",
+      "qa/SKILL.md",
+      "design-review/SKILL.md"
+    ]
+  }
+}

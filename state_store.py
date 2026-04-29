@@ -41,7 +41,7 @@ class StateStore:
         }
         for index in range(1, max(1, code_agent_count) + 1):
             agent_sessions[f"code_{index}"] = {"session_id": None, "codex_home": None, "last_step": None}
-        for index in range(1, max(1, qa_agent_count) + 1):
+        for index in range(1, max(0, qa_agent_count) + 1):
             agent_sessions[f"qa_{index}"] = {"session_id": None, "codex_home": None, "last_step": None}
 
         state = {
@@ -52,7 +52,7 @@ class StateStore:
             "user_request": user_request,
             "max_fix_iterations": max_fix_iterations,
             "discord": discord or {},
-            "parallel": {"code_agent_count": max(1, code_agent_count), "qa_agent_count": max(1, qa_agent_count)},
+            "parallel": {"code_agent_count": max(1, code_agent_count), "qa_agent_count": max(0, qa_agent_count)},
             "agent_sessions": agent_sessions,
             "artifacts": {},
             "approval_history": [],

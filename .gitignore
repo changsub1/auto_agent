@@ -19,6 +19,8 @@ env/
 
 # Generated agent run artifacts
 runs/
+reference_packs/gstack_src/
+reference_packs/karpathy_src/
 
 # OS/editor noise
 .DS_Store

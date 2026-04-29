@@ -8,6 +8,21 @@ from textwrap import dedent
 from codex_runner import CodexResult, run_codex, run_codex_result
 
 
+def _reference_block(reference_markdown: str | None) -> str:
+    if not reference_markdown or not reference_markdown.strip():
+        return ""
+    return dedent(
+        f"""
+
+        Additional role reference guidance:
+        {reference_markdown.strip()}
+
+        Treat the role reference as advisory. The current task instructions,
+        file ownership rules, and safety constraints take precedence.
+        """
+    ).strip()
+
+
 class PlannerAgent:
     """Backward-compatible single planner used by the CLI MVP."""
 
@@ -19,12 +34,14 @@ class PlannerAgent:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def create_plan(self, user_request: str, workdir: Path) -> str:
         return PlannerAgentA(
@@ -33,6 +50,7 @@ class PlannerAgent:
             timeout=self.timeout,
             model=self.model,
             reasoning_effort=self.reasoning_effort,
+            reference_markdown=self.reference_markdown,
         ).create_initial_plan(user_request, workdir).stdout
 
 
@@ -47,12 +65,14 @@ class PlannerAgentA:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def create_initial_plan(
         self,
@@ -66,6 +86,8 @@ class PlannerAgentA:
             You are Planner Agent A in a Codex CLI multi-agent development workflow.
             Produce the initial planning document now. Do not ask follow-up questions.
             Do not reply with acknowledgements.
+
+            {_reference_block(self.reference_markdown)}
 
             User request:
             {user_request}
@@ -110,6 +132,8 @@ class PlannerAgentA:
             Continue as Planner Agent A.
             Revise the plan into the current final planning document.
             Use your existing session context if available.
+
+            {_reference_block(self.reference_markdown)}
 
             User request:
             {user_request}
@@ -168,12 +192,14 @@ class PlannerAgentB:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def review_plan(
         self,
@@ -190,6 +216,8 @@ class PlannerAgentB:
             You are Planner Agent B in a Codex CLI multi-agent development workflow.
             Review Planner Agent A's plan against the user's request.
             Do not rewrite the full plan. Provide focused review comments.
+
+            {_reference_block(self.reference_markdown)}
 
             User request:
             {user_request}
@@ -414,6 +442,7 @@ class CodeAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.codex_home = codex_home
@@ -421,6 +450,7 @@ class CodeAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def implement_tasks_result(
         self,
@@ -435,6 +465,8 @@ class CodeAgent:
             f"""
             You are {self.agent_id}, a Code Agent in a parallel Codex development workflow.
             Implement only your assigned tasks. Do not ask follow-up questions.
+
+            {_reference_block(self.reference_markdown)}
 
             Work only in the current working directory. The current working directory is
             your isolated agent workspace. Do not modify files outside it.
@@ -457,6 +489,9 @@ class CodeAgent:
             - Keep the app runnable locally.
             - Keep dependencies minimal.
             - If you add tests, keep them lightweight and local.
+            - If your assignment produces a runnable app or a runnable slice,
+              create or update codex_app_manifest.json with safe local checks.
+              Commands in the manifest must be JSON arrays, not shell strings.
 
             When finished, print:
             1. Files changed
@@ -496,6 +531,8 @@ class CodeAgent:
             The integrated app failed QA or the user requested fixes. Resume your own work,
             inspect the feedback, and update only the files owned or allowed by your assignment.
 
+            {_reference_block(self.reference_markdown)}
+
             Work only in the current working directory. Do not modify files outside it.
             Do not ask follow-up questions.
 
@@ -519,6 +556,8 @@ class CodeAgent:
             - Never edit forbidden_paths.
             - Keep public interfaces compatible with the contract.
             - Keep the app runnable locally.
+            - Update codex_app_manifest.json if the run, test, or smoke-check
+              command changes. Commands must be JSON arrays, not shell strings.
 
             When finished, print:
             1. Files changed
@@ -553,12 +592,14 @@ class IntegratorAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def integrate_result(
         self,
@@ -575,6 +616,8 @@ class IntegratorAgent:
             You are Integrator Agent in a parallel Codex development workflow.
             Merge the code-agent outputs into integration/merged_app.
             Do not ask follow-up questions.
+
+            {_reference_block(self.reference_markdown)}
 
             Work in the run directory. You may read contract/, scaffold_app/,
             agent_workspaces/, agent_outputs/, and integration/.
@@ -598,6 +641,9 @@ class IntegratorAgent:
             - Resolve conflicts consistently with the contract.
             - Preserve useful tests and docs from code agents.
             - Ensure app.py, requirements.txt, and README.md exist unless the contract says otherwise.
+            - Ensure codex_app_manifest.json exists in integration/merged_app and
+              describes safe local setup, test, smoke, server, or browser checks.
+              Commands in the manifest must be JSON arrays, not shell strings.
             - Keep dependencies minimal.
             - Do not write outside integration/merged_app.
 
@@ -635,6 +681,8 @@ class IntegratorAgent:
             Continue as Integrator Agent in a parallel Codex development workflow.
             The integrated app failed QA or the user requested fixes.
 
+            {_reference_block(self.reference_markdown)}
+
             Work in the run directory. You may read contract/, scaffold_app/,
             agent_workspaces/, agent_outputs/, and integration/.
             Write only inside integration/merged_app. Do not ask follow-up questions.
@@ -660,6 +708,7 @@ class IntegratorAgent:
             - Fix shared entrypoints, merge errors, missing files, or cross-agent integration bugs.
             - Do not overwrite a code agent's owned implementation unless needed to connect it.
             - Keep app.py, requirements.txt, and README.md valid unless the contract says otherwise.
+            - Keep codex_app_manifest.json valid and aligned with the final runnable app.
             - Keep dependencies minimal.
             - Do not write outside integration/merged_app.
 
@@ -693,6 +742,7 @@ class QAAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.codex_home = codex_home
@@ -700,6 +750,7 @@ class QAAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.reference_markdown = reference_markdown
 
     def review_result(
         self,
@@ -720,6 +771,8 @@ class QAAgent:
             mechanical QA report, and attached screenshots when present.
 
             Do not modify files. Do not ask follow-up questions.
+
+            {_reference_block(self.reference_markdown)}
 
             User request:
             {user_request}

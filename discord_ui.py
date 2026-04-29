@@ -1,4 +1,4 @@
-"""Discord views for human approval of generated contract bundles."""
+"""Discord views for human approval of generated plans and QA results."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import discord
 
 
 class PlanApprovalView(discord.ui.View):
-    """Approval controls shown after a contract bundle is produced."""
+    """Approval controls shown after a plan or contract bundle is produced."""
 
     def __init__(self, *, engine: Any, run_id: str, requester_id: int, timeout: float | None = 3600) -> None:
         super().__init__(timeout=timeout)
@@ -46,7 +46,7 @@ class PlanApprovalView(discord.ui.View):
                 item.disabled = True
 
 
-class RevisionRequestModal(discord.ui.Modal, title="Contract revision request"):
+class RevisionRequestModal(discord.ui.Modal, title="Plan or contract revision request"):
     feedback = discord.ui.TextInput(
         label="What should change?",
         style=discord.TextStyle.paragraph,

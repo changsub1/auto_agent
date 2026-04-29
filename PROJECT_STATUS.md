@@ -53,6 +53,10 @@ codex exec --skip-git-repo-check --sandbox workspace-write --color never -
 - QA result, generated app path, and executable QA screenshots are posted back
   to Discord when the probe can run.
 - After QA, Discord asks the requester to approve the result or request fixes.
+- A first routing core is implemented through `ROUTING_MODE` with `fast`,
+  `balanced`, `parallel`, and `manual` modes. The default is `balanced`. Fast
+  and balanced routes now use `CodeAgent(code_1)` directly instead of the
+  legacy `DeveloperAgent`.
 
 ### Session and State Management
 
@@ -88,22 +92,122 @@ codex exec resume <session_id> -
 - `discord_reporter.py`: Discord message helpers
 - `executable_qa.py`: generated app execution probes, screenshots, and runtime logs
 - `qa.py`: mechanical QA result composition and Python syntax QA
+- `routing.py`: deterministic route selection for fast, balanced, parallel, and manual runs
+- `reference_packs.py`: copies curated reference packs into each run and loads
+  role-specific `pack/role` guidance for agent prompts
+- `reference_packs/karpathy/`: curated lightweight coding discipline for Code
+  Agents and the Integrator, based on andrej-karpathy-skills source material
+- `reference_packs/gstack/`: curated role guidance distilled from gstack source
+  skills without running the gstack installer or source scripts
 - `workspace_manager.py`: run folder and generated app folder helpers
 - `config.py`: environment variable configuration
 
 ## Known Limitations
 
+- The Discord approval path no longer always uses the full contract/scaffold/
+  parallel-code/integrator/QA-agent pipeline. Route selection is currently
+  explicit through configuration rather than a natural-language router.
+- `DeveloperAgent` is still kept for the original single-developer CLI path.
+  The newer routing design should reuse `CodeAgent(code_1)` for single-agent
+  implementation so single and parallel code paths share the same prompts and
+  manifest requirements.
 - `/dev --medium` or similar per-request model/reasoning selection is not implemented yet.
 - Global `CODEX_MODEL` and `CODEX_REASONING_EFFORT` defaults are supported, but Discord per-request model/reasoning selection is not implemented yet.
 - Discord messages show planning and QA output, but generated app execution commands are not yet summarized as clearly as they could be.
 - QA now has a first executable-probe slice for static HTML, Streamlit, CLI,
   and opt-in Windows launcher checks. Broader GUI automation and app-specific
   assertions are still limited.
+- Executable QA still relies mostly on detection heuristics. It should prefer a
+  generated `codex_app_manifest.json` that declares safe setup, test, smoke,
+  server, and browser checks in a language-neutral schema.
 - Codex-backed QA Agent review is implemented after mechanical QA. It can use
   the configured QA `CODEX_HOME`, model, reasoning effort, QA report, contract,
   generated app listing, and attached screenshots.
 - Session resume is supported, but deeper long-term memory compaction is not implemented.
 - Discord approval controls are requester-only, not role/team-policy based.
+- `reference_packs/gstack_src/` and `reference_packs/karpathy_src/` are local
+  ignored vendor caches. The orchestrator only attaches curated committed
+  Markdown files to agent prompts; it does not run source scripts or installers.
+
+## Immediate Priorities
+
+### 1. Routing Core Before More UI
+
+Implemented a first routing decision layer before development starts. The first
+version is deterministic and cheap rather than another Codex call.
+
+Target run modes:
+
+- `fast`: optional lightweight planning, `CodeAgent(code_1)` owns the whole
+  `generated_app`, then mechanical QA.
+- `balanced`: Planner A/B review, `CodeAgent(code_1)` owns implementation,
+  mechanical QA, and one QA Agent review.
+- `parallel`: current contract/scaffold/code-agent/integrator/QA workflow.
+- `manual`: user-provided planner/code/QA counts and model/reasoning settings.
+
+The selected route is recorded in `state.json` and a `route.json` artifact with
+the mode, pipeline stages, agent counts, and a short reason. Remaining work:
+expose route controls in Streamlit and Discord slash command options.
+
+### 2. Unify Single-Code and Parallel-Code Agents
+
+Keep `DeveloperAgent` only as a legacy compatibility path until it can be
+removed. Fast and balanced routes now use `CodeAgent(code_1)` directly, with an
+assignment that grants ownership of the whole generated app. Remaining work:
+move the original local CLI path to the same route-aware `CodeAgent` flow.
+
+### 3. Language-Neutral QA Manifest
+
+Require final app-producing agents to create `codex_app_manifest.json` in the
+app root:
+
+- Fast/balanced route: `CodeAgent(code_1)` creates the final manifest.
+- Parallel route: Scaffold may create a draft manifest, Code Agents may suggest
+  checks, and Integrator must finalize the manifest for `generated_app`.
+
+Mechanical QA should use this order:
+
+1. Read and validate `codex_app_manifest.json`.
+2. Execute safe manifest checks with `shell=False`, timeouts, captured logs, and
+   allowlisted commands.
+3. Fall back to README run-command parsing.
+4. Fall back to language/framework adapters such as Python, Node, Go, Rust, and
+   static web.
+5. Mark executable QA as `SKIP` with a clear reason if no safe target is found.
+
+QA Agent should review the manifest, mechanical QA report, screenshots, and
+contract. It should not be responsible for launching arbitrary commands.
+
+### 4. Repository Skills for Agent Quality
+
+Reference guidance is now role-specific with `pack/role` profiles. Defaults:
+
+- `planner_a`: none
+- `planner_b`: none
+- `code_agent`: `karpathy/code_agent`
+- `integrator`: `karpathy/integrator`
+- `qa_agent`: none
+
+gstack remains available as an opt-in profile source, for example
+`gstack/planner_a`, `gstack/planner_b`, or `gstack/qa_agent`. The orchestrator
+copies only the selected curated packs into `runs/<run_id>/reference_packs/` and
+records `reference_profiles.json`. Remaining work: expose profile selection in
+Discord and the dashboard, then promote stable files into repo-scoped skills
+under `.agents/skills` if the prompt-only pack proves useful.
+
+Candidate repo-scoped skills:
+
+- `planner-product`: small MVP planning, acceptance criteria, and route hints.
+- `task-splitter`: `task_manifest.json`, file ownership, dependency, and
+  integration-plan rules.
+- `app-manifest`: `codex_app_manifest.json` schema and safe command examples.
+- `qa-reviewer`: manifest/report/screenshot-based PASS/FAIL review format.
+- `frontend-visual-qa`: screenshot review rules for blank pages, layout
+  breakage, missing primary UI, and obvious interaction failures.
+
+Use skills to improve agent reasoning and output formats. Keep actual app
+execution, screenshots, command safety, logs, and timeouts in the Python QA
+harness.
 
 ## Phase 2: Proposed Next Work
 
@@ -140,16 +244,23 @@ Implementation notes:
 ### Stronger QA
 
 - Add generated app file presence checks.
-- Validate `requirements.txt` exists.
+- Validate `codex_app_manifest.json` when present and surface schema errors in
+  the QA report.
+- Add a language-neutral manifest runner for safe local setup, test, CLI,
+  server, and browser checks.
+- Keep Python syntax checks as one adapter, not the whole QA model.
+- Add README run-command parsing as a fallback when the manifest is missing.
 - Expand app-specific browser assertions beyond the generic keyboard probe.
 - Add Tkinter/Pygame-safe smoke test strategy where practical.
 - Expand QA Agent prompts and routing for multiple specialized reviewers.
 
 ### Code Review Agent
 
-- Add Code Agent 2 or Reviewer Agent.
+- Reuse `CodeAgent(code_1)` for fast and balanced single-agent implementation.
+- Keep `DeveloperAgent` as a legacy path until the router can replace it.
+- Add Code Agent 2 or Reviewer Agent only when the selected route justifies it.
 - Reviewer checks whether generated code matches the approved plan.
-- Reviewer can request Developer Agent revisions before QA.
+- Reviewer can request targeted Code Agent or Integrator revisions before QA.
 
 ## Phase 3: Parallel Agent Workflow
 

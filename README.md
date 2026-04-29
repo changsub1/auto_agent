@@ -92,6 +92,13 @@ set CODE_AGENT_CODEX_HOMES=C:\Users\USER\.codex_developer_1,C:\Users\USER\.codex
 set CODE_AGENT_COUNT=2
 set QA_AGENT_CODEX_HOMES=C:\Users\USER\.codex_qa
 set QA_AGENT_COUNT=1
+set ROUTING_MODE=balanced
+set REFERENCE_PACK_ENABLED=1
+set PLANNER_A_REFERENCE=
+set PLANNER_B_REFERENCE=
+set CODE_AGENT_REFERENCE=karpathy/code_agent
+set INTEGRATOR_REFERENCE=karpathy/integrator
+set QA_AGENT_REFERENCE=
 set CODEX_MODEL=gpt-5.4
 set CODEX_REASONING_EFFORT=medium
 set MAX_FIX_ITERATIONS=1
@@ -118,13 +125,49 @@ buttons:
 - Request changes
 - Cancel
 
-Approval starts scaffold, parallel Code Agents, integration, and QA. A contract
-revision request sends the feedback back into the planning loop. After QA, the
+Approval starts the selected routing pipeline. Fast and balanced routes use one
+`CodeAgent`; the parallel route starts scaffold, parallel Code Agents,
+integration, and QA. A contract or plan revision request sends the feedback
+back into the planning loop. After QA, the
 bot posts the report and any screenshots, then asks the requester to approve
 the result or request implementation fixes. Fixes are routed to the owning
 `code_N` session when QA identifies an owned path or suspected owner; shared,
 cross-agent, or unknown issues go to the Integrator. `DeveloperAgent` remains
 only for the legacy single-developer CLI path.
+
+`ROUTING_MODE` controls the development pipeline. The default is `balanced`:
+
+- `fast`: Planner A, one `CodeAgent`, and mechanical QA.
+- `balanced`: Planner A/B, one `CodeAgent`, mechanical QA, and one QA Agent when configured.
+- `parallel`: contract, scaffold, parallel Code Agents, Integrator, and QA.
+- `manual`: use configured code/QA counts; more than one code agent uses the parallel route.
+
+Set `QA_AGENT_COUNT=0` to run only mechanical QA for routes that would otherwise
+include Codex-backed QA review.
+
+Reference profiles are role-specific and use `pack/role` syntax. By default,
+only Code Agents and the Integrator receive the lightweight Karpathy-inspired
+coding guidance:
+
+```text
+CODE_AGENT_REFERENCE=karpathy/code_agent
+INTEGRATOR_REFERENCE=karpathy/integrator
+```
+
+Planner and QA references are empty by default. They can be customized, for
+example:
+
+```text
+PLANNER_A_REFERENCE=gstack/planner_a
+PLANNER_B_REFERENCE=gstack/planner_b
+QA_AGENT_REFERENCE=gstack/qa_agent
+```
+
+At run start, the orchestrator copies only the selected curated packs into
+`runs/<run_id>/reference_packs/` and attaches the matching role file to each
+agent prompt. The ignored `reference_packs/gstack_src/` and
+`reference_packs/karpathy_src/` directories are local vendor source caches;
+their installers and source scripts are not run by this project.
 
 Executable browser QA uses Playwright when it is installed. Install the Python
 package through `requirements.txt`, then install Chromium once:
@@ -179,6 +222,18 @@ runs/YYYYMMDD_HHMMSS/
   state.json
   events.jsonl
   transcript.md
+  reference_packs/
+    karpathy/
+      reference_pack_manifest.json
+      code_agent.md
+      integrator.md
+    gstack/
+      reference_pack_manifest.json
+      planner_a.md
+      planner_b.md
+      code_agent.md
+      integrator.md
+      qa_agent.md
   plan.md
   planning/
     01_planner_a_draft.md
