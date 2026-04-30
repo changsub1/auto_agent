@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -21,6 +22,7 @@ from app_services import (
 )
 from run_worker import RunWorker
 from state_store import StateStore
+from workflow_engine import WorkflowEngine
 
 
 class AppServiceTests(unittest.TestCase):
@@ -181,6 +183,52 @@ class FakeWorkflowEngine:
         store.set_status("cancelled")
 
 
+class CancelAwareFakeWorkflowEngine(FakeWorkflowEngine):
+    def run_planning(self, run_id: str, *, feedback: str | None = None) -> None:
+        self.planning_feedback.append(feedback)
+        run_dir = self.project_root / "runs" / run_id
+        store = StateStore(run_dir)
+        store.set_active_step(stage="planning", agent_id="planner_a", interruptible=True)
+        for _ in range(20):
+            time.sleep(0.05)
+            if store.load().get("status") == "cancelled":
+                store.clear_active_step()
+                return
+        store.write_artifact("planning/03_final_plan.md", "# Fake Plan\n", artifact_name="final_plan")
+        store.set_status("awaiting_plan_approval")
+        store.clear_active_step()
+
+
+class FakeProcessHandle:
+    pid = 4242
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def cancel(self) -> None:
+        self.cancelled = True
+
+
+class AsyncPlanningFakeWorkflowEngine(FakeWorkflowEngine):
+    def __init__(self, project_root: Path) -> None:
+        super().__init__(project_root)
+        self.async_called = False
+        self.started_agents: list[str] = []
+
+    async def run_planning_async(self, run_id: str, *, feedback: str | None = None, process_started=None) -> None:
+        self.async_called = True
+        self.planning_feedback.append(feedback)
+        if process_started:
+            self.started_agents.append("planner_a")
+            process_started("planner_a", FakeProcessHandle())
+        await asyncio.sleep(0.01)
+        run_dir = self.project_root / "runs" / run_id
+        store = StateStore(run_dir)
+        store.write_artifact("planning/03_final_plan.md", "# Async Fake Plan\n", artifact_name="final_plan")
+        store.set_status("awaiting_plan_approval")
+        store.clear_active_step()
+
+
 class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -239,6 +287,97 @@ class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
                 service.approve(detail.run_id, OperatorActionRequest(user_id="tester"))
         finally:
             await worker.stop()
+
+    async def test_cancel_active_job_cancels_registered_process(self) -> None:
+        engine = CancelAwareFakeWorkflowEngine(self.project_root)
+        worker = RunWorker(self.project_root, engine=engine)
+        await worker.start()
+        try:
+            service = RunService(self.project_root, worker=worker)
+            detail = await service.create_run_and_enqueue(RunCreateRequest(user_request="Build an app"))
+            deadline = time.monotonic() + 3
+            while detail.run_id not in worker.active_jobs:
+                if time.monotonic() >= deadline:
+                    self.fail("worker did not start planning job")
+                await asyncio.sleep(0.02)
+
+            handle = FakeProcessHandle()
+            worker.register_process(detail.run_id, handle, stage="planning", agent_id="planner_a")
+
+            await service.cancel_and_enqueue(
+                detail.run_id,
+                OperatorActionRequest(user_id="tester", feedback="Stop this run"),
+            )
+            await worker.wait_idle(timeout=3)
+
+            final = service.get_run(detail.run_id)
+            self.assertTrue(handle.cancelled)
+            self.assertEqual(final.status, "cancelled")
+            self.assertEqual(final.state["active_step"]["stage"], None)
+            self.assertNotIn(detail.run_id, worker.active_processes)
+            events = (Path(final.run_dir) / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("active_process_cancel_started", events)
+            self.assertIn("active_process_cancelled", events)
+        finally:
+            await worker.stop()
+
+    async def test_planning_job_uses_async_engine_and_registers_process(self) -> None:
+        engine = AsyncPlanningFakeWorkflowEngine(self.project_root)
+        worker = RunWorker(self.project_root, engine=engine)
+        await worker.start()
+        try:
+            service = RunService(self.project_root, worker=worker)
+            detail = await service.create_run_and_enqueue(RunCreateRequest(user_request="Build an app"))
+
+            await worker.wait_idle(timeout=3)
+
+            final = service.get_run(detail.run_id)
+            self.assertTrue(engine.async_called)
+            self.assertEqual(engine.started_agents, ["planner_a"])
+            self.assertEqual(final.status, "awaiting_plan_approval")
+            self.assertEqual(final.state["active_step"]["stage"], None)
+            self.assertNotIn(detail.run_id, worker.active_processes)
+            events = (Path(final.run_dir) / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("active_step_changed", events)
+        finally:
+            await worker.stop()
+
+
+class WorkflowEngineAsyncPlanningTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project_root = Path(self.tmp.name)
+        self.run_dir = self.project_root / "runs" / "20260430_120000"
+        self.run_dir.mkdir(parents=True)
+        StateStore(self.run_dir).initialize(user_request="Build an app")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def test_run_planning_async_records_process_and_reaches_approval(self) -> None:
+        async def fake_planning_stage(run_dir, logs_dir, store, config, **kwargs):
+            process_started = kwargs.get("process_started")
+            if process_started:
+                process_started("planner_a", FakeProcessHandle())
+            store.write_artifact("planning/03_final_plan.md", "# Async Plan\n", artifact_name="final_plan")
+            return {
+                "planner_a_draft": "# Draft",
+                "planner_review": "# Review",
+                "final_plan": "# Async Plan",
+            }
+
+        seen_processes = []
+        with patch("workflow_engine.run_planning_stage_async", side_effect=fake_planning_stage):
+            await WorkflowEngine(self.project_root).run_planning_async(
+                "20260430_120000",
+                process_started=lambda agent_id, handle: seen_processes.append((agent_id, handle.pid)),
+            )
+
+        state = StateStore(self.run_dir).load()
+        self.assertEqual(state["status"], "awaiting_plan_approval")
+        self.assertEqual(state["active_step"]["stage"], None)
+        self.assertEqual(seen_processes, [("planner_a", 4242)])
+        self.assertTrue((self.run_dir / "planning" / "03_final_plan.md").exists())
 
 
 if __name__ == "__main__":

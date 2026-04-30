@@ -41,6 +41,7 @@ class RunWorker:
         self._stopping = False
         self._queued: dict[str, RunJob] = {}
         self.active_jobs: dict[str, RunJob] = {}
+        self.active_processes: dict[str, Any] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def start(self) -> None:
@@ -63,11 +64,81 @@ class RunWorker:
     async def enqueue(self, job: RunJob) -> None:
         if self._queue is None:
             raise RuntimeError("RunWorker has not been started.")
+        if job.kind == "cancel" and job.run_id in self.active_jobs:
+            self._append_worker_event(
+                job.run_id,
+                "worker_cancel_requested",
+                "Active run cancellation requested",
+                job,
+            )
+            await self.cancel_active_process(job.run_id, job=job)
+            await asyncio.to_thread(
+                self.engine.mark_cancelled,
+                job.run_id,
+                requested_by=job.requested_by,
+                feedback=job.feedback,
+            )
+            return
         if job.kind != "cancel" and (job.run_id in self._queued or job.run_id in self.active_jobs):
             raise ValueError(f"Run {job.run_id} already has a queued or active job.")
         self._queued[job.run_id] = job
         self._append_worker_event(job.run_id, "worker_job_queued", f"{job.kind} queued", job)
         await self._queue.put(job)
+
+    def register_process(
+        self,
+        run_id: str,
+        handle: Any,
+        *,
+        stage: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """Register a running child process so operator cancel can stop it."""
+
+        self.active_processes[run_id] = handle
+        run_dir = self.runs_root / run_id
+        if not run_dir.exists():
+            return
+        store = StateStore(run_dir)
+        active_step = store.load().get("active_step") or {}
+        active_stage = stage or active_step.get("stage") or "codex"
+        active_agent_id = agent_id if agent_id is not None else active_step.get("agent_id")
+        store.set_active_step(
+            stage=str(active_stage),
+            agent_id=active_agent_id,
+            pid=getattr(handle, "pid", None),
+            interruptible=True,
+        )
+
+    async def cancel_active_process(self, run_id: str, *, job: RunJob | None = None) -> bool:
+        handle = self.active_processes.get(run_id)
+        if handle is None:
+            return False
+        run_dir = self.runs_root / run_id
+        if run_dir.exists():
+            event_job = job or self.active_jobs.get(run_id) or RunJob(run_id=run_id, kind="cancel")
+            self._append_worker_event(
+                run_id,
+                "active_process_cancel_started",
+                "Active child process cancellation started",
+                event_job,
+                {"pid": getattr(handle, "pid", None)},
+            )
+        try:
+            await handle.cancel()
+        finally:
+            self.active_processes.pop(run_id, None)
+        if run_dir.exists():
+            event_job = job or self.active_jobs.get(run_id) or RunJob(run_id=run_id, kind="cancel")
+            self._append_worker_event(
+                run_id,
+                "active_process_cancelled",
+                "Active child process cancelled",
+                event_job,
+                {"pid": getattr(handle, "pid", None)},
+            )
+            StateStore(run_dir).clear_active_step()
+        return True
 
     async def wait_idle(self, *, timeout: float = 10.0) -> None:
         """Test helper: wait until the queue and active registry are empty."""
@@ -75,7 +146,7 @@ class RunWorker:
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             queue_empty = self._queue is None or self._queue.empty()
-            if queue_empty and not self._queued and not self.active_jobs:
+            if queue_empty and not self._queued and not self.active_jobs and not self.active_processes:
                 return
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError("RunWorker did not become idle before timeout.")
@@ -102,19 +173,21 @@ class RunWorker:
             except Exception as exc:  # noqa: BLE001 - worker must persist failures.
                 self._record_failure(job, exc)
             finally:
+                self.active_processes.pop(job.run_id, None)
                 self.active_jobs.pop(job.run_id, None)
 
     async def _dispatch(self, job: RunJob) -> None:
         if job.kind == "start_planning":
-            await asyncio.to_thread(self.engine.run_planning, job.run_id, feedback=job.feedback or None)
+            await self._run_planning_job(job)
             return
         if job.kind == "revise_plan":
-            await asyncio.to_thread(self.engine.run_planning, job.run_id, feedback=job.feedback or None)
+            await self._run_planning_job(job)
             return
         if job.kind == "continue_after_plan_approval":
             await asyncio.to_thread(self.engine.mark_development_queued, job.run_id)
             return
         if job.kind == "cancel":
+            await self.cancel_active_process(job.run_id, job=job)
             await asyncio.to_thread(
                 self.engine.mark_cancelled,
                 job.run_id,
@@ -124,9 +197,35 @@ class RunWorker:
             return
         raise ValueError(f"Unsupported run job kind: {job.kind}")
 
+    async def _run_planning_job(self, job: RunJob) -> None:
+        run_planning_async = getattr(self.engine, "run_planning_async", None)
+        if run_planning_async is None:
+            await asyncio.to_thread(self.engine.run_planning, job.run_id, feedback=job.feedback or None)
+            return
+
+        await run_planning_async(
+            job.run_id,
+            feedback=job.feedback or None,
+            process_started=lambda agent_id, handle: self.register_process(
+                job.run_id,
+                handle,
+                stage="planning",
+                agent_id=agent_id,
+            ),
+        )
+
     def _record_failure(self, job: RunJob, exc: Exception) -> None:
         try:
             store = StateStore(self.runs_root / job.run_id)
+            if _run_was_cancelled(store.load()):
+                store.append_event(
+                    "worker_job_cancelled",
+                    "system",
+                    f"{job.kind} cancelled",
+                    {"error": str(exc), **_job_data(job)},
+                )
+                store.clear_active_step()
+                return
             store.set_status("failed")
             store.append_event(
                 "worker_job_failed",
@@ -138,11 +237,18 @@ class RunWorker:
         except Exception:
             return
 
-    def _append_worker_event(self, run_id: str, event_type: str, message: str, job: RunJob) -> None:
+    def _append_worker_event(
+        self,
+        run_id: str,
+        event_type: str,
+        message: str,
+        job: RunJob,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         run_dir = self.runs_root / run_id
         if not run_dir.exists():
             return
-        StateStore(run_dir).append_event(event_type, "system", message, _job_data(job))
+        StateStore(run_dir).append_event(event_type, "system", message, {**_job_data(job), **(extra or {})})
 
 
 def _job_data(job: RunJob) -> dict[str, Any]:
@@ -152,3 +258,9 @@ def _job_data(job: RunJob) -> dict[str, Any]:
         "feedback": job.feedback,
         "created_at": job.created_at,
     }
+
+
+def _run_was_cancelled(state: dict[str, Any]) -> bool:
+    control = state.get("control")
+    requested_action = control.get("requested_action") if isinstance(control, dict) else None
+    return state.get("status") == "cancelled" or requested_action == "cancel"

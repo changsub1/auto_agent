@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from textwrap import dedent
+from typing import Callable
 
-from codex_runner import CodexResult, run_codex, run_codex_result
+from codex_runner import CodexProcessHandle, CodexResult, run_codex, run_codex_result, run_codex_result_async
 
 
 def _reference_block(reference_markdown: str | None) -> str:
@@ -88,7 +89,71 @@ class PlannerAgentA:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._initial_plan_prompt(user_request)
+        return self._run(prompt, workdir, session_id=session_id, label="planner_a_draft")
+
+    async def create_initial_plan_async(
+        self,
+        user_request: str,
+        workdir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._initial_plan_prompt(user_request)
+        return await self._run_async(
+            prompt,
+            workdir,
+            session_id=session_id,
+            label="planner_a_draft",
+            process_started=process_started,
+        )
+
+    def revise_final_plan(
+        self,
+        user_request: str,
+        previous_plan: str,
+        review: str,
+        workdir: Path,
+        *,
+        user_feedback: str | None = None,
+        session_id: str | None = None,
+    ) -> CodexResult:
+        prompt = self._final_plan_prompt(
+            user_request,
+            previous_plan,
+            review,
+            user_feedback=user_feedback,
+        )
+        return self._run(prompt, workdir, session_id=session_id, label="planner_a_final")
+
+    async def revise_final_plan_async(
+        self,
+        user_request: str,
+        previous_plan: str,
+        review: str,
+        workdir: Path,
+        *,
+        user_feedback: str | None = None,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._final_plan_prompt(
+            user_request,
+            previous_plan,
+            review,
+            user_feedback=user_feedback,
+        )
+        return await self._run_async(
+            prompt,
+            workdir,
+            session_id=session_id,
+            label="planner_a_final",
+            process_started=process_started,
+        )
+
+    def _initial_plan_prompt(self, user_request: str) -> str:
+        return dedent(
             f"""
             You are Planner Agent A in a Codex CLI multi-agent development workflow.
             Produce the initial planning document now. Do not ask follow-up questions.
@@ -123,20 +188,17 @@ class PlannerAgentA:
             Start the response with "# Planner A Draft".
             """
         ).strip()
-        return self._run(prompt, workdir, session_id=session_id, label="planner_a_draft")
 
-    def revise_final_plan(
+    def _final_plan_prompt(
         self,
         user_request: str,
         previous_plan: str,
         review: str,
-        workdir: Path,
         *,
-        user_feedback: str | None = None,
-        session_id: str | None = None,
-    ) -> CodexResult:
+        user_feedback: str | None,
+    ) -> str:
         feedback_block = user_feedback or "(no additional user feedback)"
-        prompt = dedent(
+        return dedent(
             f"""
             Continue as Planner Agent A.
             Revise the plan into the current final planning document.
@@ -167,7 +229,6 @@ class PlannerAgentA:
             Start the response with "# Final Plan".
             """
         ).strip()
-        return self._run(prompt, workdir, session_id=session_id, label="planner_a_final")
 
     def _run(
         self,
@@ -188,6 +249,29 @@ class PlannerAgentA:
             sandbox="workspace-write",
             model=self.model,
             reasoning_effort=self.reasoning_effort,
+        )
+
+    async def _run_async(
+        self,
+        prompt: str,
+        workdir: Path,
+        *,
+        session_id: str | None,
+        label: str,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        return await run_codex_result_async(
+            prompt,
+            workdir=workdir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=label,
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            process_started=process_started,
         )
 
 
@@ -220,8 +304,54 @@ class PlannerAgentB:
         user_feedback: str | None = None,
         session_id: str | None = None,
     ) -> CodexResult:
+        prompt = self._review_prompt(user_request, plan_markdown, user_feedback=user_feedback)
+        return run_codex_result(
+            prompt,
+            workdir=workdir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="planner_b_review",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+    async def review_plan_async(
+        self,
+        user_request: str,
+        plan_markdown: str,
+        workdir: Path,
+        *,
+        user_feedback: str | None = None,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._review_prompt(user_request, plan_markdown, user_feedback=user_feedback)
+        return await run_codex_result_async(
+            prompt,
+            workdir=workdir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="planner_b_review",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            process_started=process_started,
+        )
+
+    def _review_prompt(
+        self,
+        user_request: str,
+        plan_markdown: str,
+        *,
+        user_feedback: str | None,
+    ) -> str:
         feedback_block = user_feedback or "(no additional user feedback)"
-        prompt = dedent(
+        return dedent(
             f"""
             You are Planner Agent B in a Codex CLI multi-agent development workflow.
             Review Planner Agent A's plan against the user's request.
@@ -255,18 +385,6 @@ class PlannerAgentB:
             Start the response with "# Planner B Review".
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=workdir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label="planner_b_review",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-        )
 
 
 class ArchitectAgent:

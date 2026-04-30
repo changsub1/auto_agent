@@ -7,9 +7,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
+from typing import Callable
 
 from agents import ArchitectAgent, PlannerAgentA, PlannerAgentB, ScaffoldAgent
-from codex_runner import CodexResult, run_codex_result
+from codex_runner import CodexProcessHandle, CodexResult, run_codex_result, run_codex_result_async
 from parallel_workflow import create_contract_dir, create_scaffold_dir, normalize_contract_bundle, render_contract_bundle
 from state_store import StateStore
 from workspace_manager import create_logs_dir, create_run_dir, normalize_windows_command_files, save_text
@@ -139,6 +140,7 @@ def run_planning_stage(
     )
     store.append_event("agent_output", "planner_a", "Planner A draft created", {"path": store.to_relative(draft_path)})
     store.append_transcript("Planner A Draft", draft_result.stdout)
+    _raise_if_planning_cancelled(store)
 
     review_text = "(planner review skipped because planner_count is 1)"
     if config.planner_count >= 2:
@@ -171,6 +173,7 @@ def run_planning_stage(
         )
         store.append_event("agent_output", "planner_b", "Planner B review created", {"path": store.to_relative(review_path)})
         store.append_transcript("Planner B Review", review_text)
+        _raise_if_planning_cancelled(store)
 
     if config.planner_count >= 3:
         planner_c_result = _run_planner_c_review(
@@ -196,6 +199,7 @@ def run_planning_stage(
         store.append_event("agent_output", "planner_c", "Planner C risk review created", {"path": store.to_relative(planner_c_path)})
         store.append_transcript("Planner C Risk Review", planner_c_result.stdout)
         review_text = "\n\n".join([review_text, planner_c_result.stdout])
+        _raise_if_planning_cancelled(store)
 
     if config.planner_count >= 2:
         final_result = planner_a.revise_final_plan(
@@ -204,6 +208,151 @@ def run_planning_stage(
             review_text,
             run_dir,
             user_feedback=user_feedback,
+        )
+        final_text = final_result.stdout
+        store.update_agent_session(
+            "planner_a",
+            session_id=final_result.session_id,
+            codex_home=config.planner_a_codex_home,
+            model=final_result.model,
+            reasoning_effort=final_result.reasoning_effort,
+            last_step="final_plan",
+        )
+    else:
+        final_text = draft_result.stdout
+
+    final_path = store.write_artifact(
+        "planning/03_final_plan.md",
+        final_text,
+        artifact_name="final_plan",
+    )
+    save_text(run_dir / "plan.md", final_text)
+    store.record_artifact("plan_md", run_dir / "plan.md")
+    store.append_event("agent_output", "planner_a", "Final plan created", {"path": store.to_relative(final_path)})
+    store.append_transcript("Final Plan", final_text)
+
+    return {
+        "planner_a_draft": draft_result.stdout,
+        "planner_review": review_text,
+        "final_plan": final_text,
+    }
+
+
+async def run_planning_stage_async(
+    run_dir: Path,
+    logs_dir: Path,
+    store: StateStore,
+    config: LocalRunConfig,
+    *,
+    user_feedback: str | None = None,
+    running_status: str = "dashboard_planning_running",
+    process_started: Callable[[str, CodexProcessHandle], None] | None = None,
+) -> dict[str, str]:
+    store.set_status(running_status)
+    planning_request = config.user_request
+    if user_feedback:
+        planning_request = "\n\n".join(
+            [
+                config.user_request,
+                "User revision feedback:",
+                user_feedback,
+            ]
+        )
+    planner_a = PlannerAgentA(
+        codex_home=config.planner_a_codex_home,
+        logs_dir=logs_dir,
+        timeout=config.timeout_seconds,
+        model=config.model,
+        reasoning_effort=config.reasoning_effort,
+    )
+    draft_result = await planner_a.create_initial_plan_async(
+        planning_request,
+        run_dir,
+        process_started=_agent_process_started(process_started, "planner_a"),
+    )
+    draft_path = store.write_artifact(
+        "planning/01_planner_a_draft.md",
+        draft_result.stdout,
+        artifact_name="planner_a_draft",
+    )
+    store.update_agent_session(
+        "planner_a",
+        session_id=draft_result.session_id,
+        codex_home=config.planner_a_codex_home,
+        model=draft_result.model,
+        reasoning_effort=draft_result.reasoning_effort,
+        last_step="draft",
+    )
+    store.append_event("agent_output", "planner_a", "Planner A draft created", {"path": store.to_relative(draft_path)})
+    store.append_transcript("Planner A Draft", draft_result.stdout)
+
+    review_text = "(planner review skipped because planner_count is 1)"
+    if config.planner_count >= 2:
+        planner_b = PlannerAgentB(
+            codex_home=config.planner_b_codex_home,
+            logs_dir=logs_dir,
+            timeout=config.timeout_seconds,
+            model=config.model,
+            reasoning_effort=config.reasoning_effort,
+        )
+        review_result = await planner_b.review_plan_async(
+            config.user_request,
+            draft_result.stdout,
+            run_dir,
+            user_feedback=user_feedback,
+            process_started=_agent_process_started(process_started, "planner_b"),
+        )
+        review_text = review_result.stdout
+        review_path = store.write_artifact(
+            "planning/02_planner_b_review.md",
+            review_text,
+            artifact_name="planner_b_review",
+        )
+        store.update_agent_session(
+            "planner_b",
+            session_id=review_result.session_id,
+            codex_home=config.planner_b_codex_home,
+            model=review_result.model,
+            reasoning_effort=review_result.reasoning_effort,
+            last_step="review",
+        )
+        store.append_event("agent_output", "planner_b", "Planner B review created", {"path": store.to_relative(review_path)})
+        store.append_transcript("Planner B Review", review_text)
+
+    if config.planner_count >= 3:
+        planner_c_result = await _run_planner_c_review_async(
+            config=config,
+            draft=draft_result.stdout,
+            review=review_text,
+            run_dir=run_dir,
+            logs_dir=logs_dir,
+            process_started=_agent_process_started(process_started, "planner_c"),
+        )
+        planner_c_path = store.write_artifact(
+            "planning/02b_planner_c_risk_review.md",
+            planner_c_result.stdout,
+            artifact_name="planner_c_review",
+        )
+        store.update_agent_session(
+            "planner_c",
+            session_id=planner_c_result.session_id,
+            codex_home=config.planner_c_codex_home,
+            model=planner_c_result.model,
+            reasoning_effort=planner_c_result.reasoning_effort,
+            last_step="risk_review",
+        )
+        store.append_event("agent_output", "planner_c", "Planner C risk review created", {"path": store.to_relative(planner_c_path)})
+        store.append_transcript("Planner C Risk Review", planner_c_result.stdout)
+        review_text = "\n\n".join([review_text, planner_c_result.stdout])
+
+    if config.planner_count >= 2:
+        final_result = await planner_a.revise_final_plan_async(
+            config.user_request,
+            draft_result.stdout,
+            review_text,
+            run_dir,
+            user_feedback=user_feedback,
+            process_started=_agent_process_started(process_started, "planner_a"),
         )
         final_text = final_result.stdout
         store.update_agent_session(
@@ -353,6 +502,69 @@ def _run_planner_c_review(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
+
+
+async def _run_planner_c_review_async(
+    *,
+    config: LocalRunConfig,
+    draft: str,
+    review: str,
+    run_dir: Path,
+    logs_dir: Path,
+    process_started: Callable[[CodexProcessHandle], None] | None = None,
+) -> CodexResult:
+    prompt = dedent(
+        f"""
+        You are Planner Agent C in a local multi-agent development workflow.
+        Review the current plan only for implementation risk, parallel task
+        boundaries, missing acceptance criteria, and likely integration issues.
+        Do not rewrite the full plan.
+
+        User request:
+        {config.user_request}
+
+        Planner A draft:
+        {draft}
+
+        Existing planner review:
+        {review}
+
+        Return Markdown starting with "# Planner C Risk Review".
+        """
+    ).strip()
+    return await run_codex_result_async(
+        prompt,
+        workdir=run_dir,
+        codex_home=config.planner_c_codex_home,
+        timeout=config.timeout_seconds,
+        logs_dir=logs_dir,
+        label="planner_c_risk_review",
+        sandbox="workspace-write",
+        model=config.model,
+        reasoning_effort=config.reasoning_effort,
+        process_started=process_started,
+    )
+
+
+def _agent_process_started(
+    process_started: Callable[[str, CodexProcessHandle], None] | None,
+    agent_id: str,
+) -> Callable[[CodexProcessHandle], None] | None:
+    if process_started is None:
+        return None
+
+    def notify(handle: CodexProcessHandle) -> None:
+        process_started(agent_id, handle)
+
+    return notify
+
+
+def _raise_if_planning_cancelled(store: StateStore) -> None:
+    state = store.load()
+    control = state.get("control")
+    requested_action = control.get("requested_action") if isinstance(control, dict) else None
+    if state.get("status") == "cancelled" or requested_action == "cancel":
+        raise RuntimeError("Planning cancelled")
 
 
 def _record_dashboard_config(store: StateStore, config: LocalRunConfig) -> None:

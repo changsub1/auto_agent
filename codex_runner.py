@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 
 class CodexExecutionError(RuntimeError):
@@ -41,6 +44,44 @@ class CodexResult:
     reasoning_effort: str | None
     effective_approval: str | None
     effective_sandbox: str | None
+
+
+@dataclass(frozen=True)
+class CodexProcessHandle:
+    """Cancelable handle for one running Codex CLI subprocess."""
+
+    process: asyncio.subprocess.Process
+    command: list[str]
+
+    @property
+    def pid(self) -> int | None:
+        return self.process.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self.process.returncode
+
+    async def cancel(self, *, kill_after: float = 5.0) -> None:
+        """Terminate the child process, preferring a process-tree shutdown."""
+
+        if self.process.returncode is not None:
+            return
+        terminated = await _terminate_process_tree(self.process, kill_after=kill_after)
+        if terminated:
+            return
+
+        with suppress(ProcessLookupError):
+            self.process.terminate()
+        try:
+            await asyncio.wait_for(self.process.wait(), timeout=kill_after)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        with suppress(ProcessLookupError):
+            self.process.kill()
+        with suppress(ProcessLookupError):
+            await self.process.wait()
 
 
 def run_codex(
@@ -233,6 +274,175 @@ def run_codex_result(
     )
 
 
+async def run_codex_result_async(
+    prompt: str,
+    workdir: Path,
+    codex_home: str | None = None,
+    timeout: int = 600,
+    logs_dir: Path | None = None,
+    label: str = "codex",
+    session_id: str | None = None,
+    sandbox: str = "workspace-write",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
+    require_writable: bool = False,
+    process_started: Callable[[CodexProcessHandle], None] | None = None,
+) -> CodexResult:
+    """Run Codex CLI asynchronously while streaming stdout/stderr to logs."""
+
+    workdir = Path(workdir)
+    if not workdir.exists():
+        raise FileNotFoundError(f"Work directory does not exist: {workdir}")
+
+    stripped_env_names = _codex_env_names_to_strip(os.environ)
+    windows_sandbox = os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX", "").strip()
+    env = _clean_child_codex_env(os.environ)
+    if codex_home:
+        env["CODEX_HOME"] = codex_home
+
+    call_id = _make_call_id(label)
+    _write_log(logs_dir, f"{call_id}_prompt.txt", prompt)
+
+    codex_executable = _resolve_codex_executable()
+    image_paths = [Path(path) for path in (image_paths or [])]
+    command = _build_command(
+        codex_executable,
+        session_id=session_id,
+        sandbox=sandbox,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        image_paths=image_paths,
+        windows_sandbox=windows_sandbox,
+    )
+    stdout_path = _prepare_stream_log(logs_dir, f"{call_id}_stdout.txt")
+    stderr_path = _prepare_stream_log(logs_dir, f"{call_id}_stderr.txt")
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(workdir),
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        message = (
+            "Codex CLI executable was not found. Install Codex CLI and confirm "
+            "`codex --help` works in this shell."
+        )
+        _write_log(logs_dir, f"{call_id}_stderr.txt", message)
+        raise CodexExecutionError(message) from exc
+
+    process_handle = CodexProcessHandle(process=process, command=command)
+    if process_started is not None:
+        process_started(process_handle)
+
+    stdout_task = asyncio.create_task(_stream_process_output(process.stdout, stdout_path))
+    stderr_task = asyncio.create_task(_stream_process_output(process.stderr, stderr_path))
+    stdin_task = asyncio.create_task(_send_prompt(process, prompt))
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        await process_handle.cancel()
+        await _finish_stdin_task(stdin_task)
+        stdout, stderr = await _finish_stream_tasks(stdout_task, stderr_task)
+        message = f"Codex CLI timed out after {timeout} seconds."
+        if stderr_path and not stderr:
+            stderr_path.write_text(message, encoding="utf-8")
+            stderr = message
+        _write_log(
+            logs_dir,
+            f"{call_id}_meta.txt",
+            _meta_text(
+                workdir=workdir,
+                codex_home=codex_home,
+                returncode=None,
+                timeout=timeout,
+                codex_executable=codex_executable,
+                command=command,
+                resumed_session_id=session_id,
+                parsed_session_id=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                image_paths=image_paths,
+                requested_sandbox=sandbox,
+                effective_approval=None,
+                effective_sandbox=None,
+                stripped_env_names=stripped_env_names,
+                windows_sandbox=windows_sandbox,
+            ),
+        )
+        raise CodexExecutionError(message, stdout=stdout, stderr=stderr) from exc
+
+    await _finish_stdin_task(stdin_task)
+    stdout, stderr = await _finish_stream_tasks(stdout_task, stderr_task)
+    parsed_session_id = _parse_session_id(stderr) or session_id
+    effective_approval = _parse_header_value(stderr, "approval")
+    effective_sandbox = _parse_header_value(stderr, "sandbox")
+    _write_log(
+        logs_dir,
+        f"{call_id}_meta.txt",
+        _meta_text(
+            workdir=workdir,
+            codex_home=codex_home,
+            returncode=process.returncode,
+            timeout=timeout,
+            codex_executable=codex_executable,
+            command=command,
+            resumed_session_id=session_id,
+            parsed_session_id=parsed_session_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            image_paths=image_paths,
+            requested_sandbox=sandbox,
+            effective_approval=effective_approval,
+            effective_sandbox=effective_sandbox,
+            stripped_env_names=stripped_env_names,
+            windows_sandbox=windows_sandbox,
+        ),
+    )
+
+    if process.returncode != 0:
+        message = (
+            f"Codex CLI failed with exit code {process.returncode}. "
+            "See the run logs for prompt, stdout, and stderr."
+        )
+        raise CodexExecutionError(
+            message,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=process.returncode,
+        )
+
+    if require_writable and effective_sandbox == "read-only":
+        message = (
+            "Codex CLI started with an effective read-only sandbox, but this "
+            "agent step requires file writes. See the run logs for the command "
+            "and stderr header."
+        )
+        raise CodexExecutionError(
+            message,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=process.returncode,
+        )
+
+    return CodexResult(
+        stdout=stdout.strip(),
+        stderr=stderr,
+        returncode=int(process.returncode or 0),
+        session_id=parsed_session_id,
+        resumed_session_id=session_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        effective_approval=effective_approval,
+        effective_sandbox=effective_sandbox,
+    )
+
+
 def _make_call_id(label: str) -> str:
     safe_label = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label).strip("_")
     if not safe_label:
@@ -247,6 +457,119 @@ def _write_log(logs_dir: Path | None, filename: str, content: str) -> None:
     logs_dir = Path(logs_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / filename).write_text(content, encoding="utf-8")
+
+
+def _prepare_stream_log(logs_dir: Path | None, filename: str) -> Path | None:
+    if logs_dir is None:
+        return None
+    logs_dir = Path(logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / filename
+    path.write_bytes(b"")
+    return path
+
+
+async def _send_prompt(process: asyncio.subprocess.Process, prompt: str) -> None:
+    if process.stdin is None:
+        return
+    try:
+        process.stdin.write(prompt.encode("utf-8", errors="replace"))
+        await process.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        process.stdin.close()
+        with suppress(BrokenPipeError, ConnectionResetError):
+            await process.stdin.wait_closed()
+
+
+async def _stream_process_output(reader: asyncio.StreamReader | None, log_path: Path | None) -> str:
+    if reader is None:
+        return ""
+    chunks: list[bytes] = []
+    while True:
+        chunk = await reader.read(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if log_path is not None:
+            with log_path.open("ab") as file:
+                file.write(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+async def _finish_stdin_task(task: asyncio.Task[None]) -> None:
+    with suppress(BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
+        await task
+
+
+async def _finish_stream_tasks(
+    stdout_task: asyncio.Task[str],
+    stderr_task: asyncio.Task[str],
+) -> tuple[str, str]:
+    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    return stdout, stderr
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process, *, kill_after: float) -> bool:
+    pid = process.pid
+    if pid is None or process.returncode is not None:
+        return True
+    if await _terminate_process_tree_with_psutil(pid, kill_after=kill_after):
+        return True
+    if os.name == "nt" and await _terminate_process_tree_with_taskkill(pid, kill_after=kill_after):
+        return True
+    return False
+
+
+async def _terminate_process_tree_with_taskkill(pid: int, *, kill_after: float) -> bool:
+    try:
+        taskkill = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/T",
+            "/F",
+            "/PID",
+            str(pid),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
+    try:
+        returncode = await asyncio.wait_for(taskkill.wait(), timeout=kill_after)
+    except asyncio.TimeoutError:
+        with suppress(ProcessLookupError):
+            taskkill.kill()
+        with suppress(ProcessLookupError):
+            await taskkill.wait()
+        return False
+    return returncode == 0
+
+
+async def _terminate_process_tree_with_psutil(pid: int, *, kill_after: float) -> bool:
+    def terminate() -> bool:
+        try:
+            import psutil  # type: ignore[import-not-found]
+        except Exception:
+            return False
+        try:
+            parent = psutil.Process(pid)
+        except psutil.Error:
+            return True
+
+        processes = parent.children(recursive=True)
+        processes.append(parent)
+        for process_item in processes:
+            with suppress(psutil.Error):
+                process_item.terminate()
+        _, alive = psutil.wait_procs(processes, timeout=kill_after)
+        for process_item in alive:
+            with suppress(psutil.Error):
+                process_item.kill()
+        _, alive = psutil.wait_procs(alive, timeout=kill_after)
+        return not alive
+
+    return await asyncio.to_thread(terminate)
 
 
 def _resolve_codex_executable() -> str:

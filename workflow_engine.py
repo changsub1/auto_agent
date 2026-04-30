@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from local_dashboard_runner import LocalRunConfig, run_planning_stage
+from codex_runner import CodexProcessHandle
+from local_dashboard_runner import LocalRunConfig, run_planning_stage, run_planning_stage_async
 from routing import RoutingDecision
 from state_store import StateStore
 from workspace_manager import create_logs_dir
@@ -36,6 +37,51 @@ class WorkflowEngine:
                 config,
                 user_feedback=feedback,
                 running_status="planning_running",
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+            store.clear_control_action()
+            store.set_status("awaiting_plan_approval")
+        finally:
+            store.clear_active_step()
+
+    async def run_planning_async(
+        self,
+        run_id: str,
+        *,
+        feedback: str | None = None,
+        process_started: Callable[[str, CodexProcessHandle], None] | None = None,
+    ) -> None:
+        run_dir = self._run_dir(run_id)
+        store = StateStore(run_dir)
+        if _is_cancelled(store.load()):
+            store.append_event("worker_skipped", "system", "Planning skipped because run is cancelled")
+            return
+
+        config = local_config_from_state(store.load())
+        logs_dir = create_logs_dir(run_dir)
+
+        def register_process(agent_id: str, handle: CodexProcessHandle) -> None:
+            store.set_active_step(
+                stage="planning",
+                agent_id=agent_id,
+                pid=handle.pid,
+                interruptible=True,
+            )
+            if process_started is not None:
+                process_started(agent_id, handle)
+
+        store.set_active_step(stage="planning", agent_id="planner_a", interruptible=True)
+        try:
+            await run_planning_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                user_feedback=feedback,
+                running_status="planning_running",
+                process_started=register_process,
             )
             if _control_action(store.load()) == "cancel":
                 store.set_status("cancelled")
