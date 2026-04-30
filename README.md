@@ -47,8 +47,9 @@ cd multi_codex_dev_mvp
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` only contains Discord bot dependencies. Codex itself must be
-installed separately and available as `codex` on PATH.
+`requirements.txt` contains the local API, dashboard, Discord bot, and QA
+dependencies. Codex itself must be installed separately and available as
+`codex` on PATH.
 
 ## Local CLI Usage
 
@@ -212,6 +213,79 @@ The dashboard displays:
 - `qa_report.md` when available
 
 It never reads or displays `auth.json`.
+
+## Local API Usage
+
+The local desktop/web UI uses a FastAPI adapter over the shared Python service
+layer. The API is local-only and must bind to `127.0.0.1` or `localhost`.
+
+Install the API dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Run the API:
+
+```bash
+python run_local_api.py --host 127.0.0.1 --port 8765
+```
+
+Available local endpoints include:
+
+- `GET /config`
+- `POST /runs`
+- `GET /runs`
+- `GET /runs/{run_id}`
+- `GET /runs/{run_id}/events`
+- `GET /runs/{run_id}/artifacts`
+- `GET /runs/{run_id}/artifacts/content?path=...`
+- `POST /runs/{run_id}/approve`
+- `POST /runs/{run_id}/request-changes`
+- `POST /runs/{run_id}/cancel`
+- `POST /runs/{run_id}/qa/approve`
+- `POST /runs/{run_id}/qa/request-fix`
+
+`POST /runs` creates run state quickly, records the selected route/workflow, and
+enqueues background planning through the local FastAPI run worker. The UI can
+poll run detail, events, and artifacts while planning is in progress. Approval,
+revision, and cancel actions are persisted through the same service layer and
+enqueue worker jobs when possible.
+
+The current worker stops at a `development_queued` checkpoint after plan or
+contract approval. Full contract/scaffold/code/integration/QA execution still
+needs to be moved out of the Discord-owned orchestration path before the app can
+run the complete implementation pipeline by itself.
+
+## React/Tauri App Usage
+
+The `ux/` folder is now a Vite React app that reads the local FastAPI API
+instead of static mock data.
+
+Development mode:
+
+```bash
+cd ux
+pnpm install
+pnpm dev
+```
+
+In a separate terminal:
+
+```bash
+python run_local_api.py --host 127.0.0.1 --port 8765
+```
+
+Tauri desktop mode:
+
+```bash
+cd ux
+pnpm tauri:dev
+```
+
+The Tauri shell chooses a free local port, starts `run_local_api.py` as a
+sidecar process, and gives the React UI the API URL through the `api_base_url`
+Tauri command. The first packaging target is Windows NSIS.
 
 ## Run Output
 

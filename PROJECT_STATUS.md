@@ -10,6 +10,10 @@ The current system can receive a development request, let multiple Codex-backed
 agents discuss the plan, ask a human for approval in Discord, and then generate
 a runnable Python app locally.
 
+As of 2026-04-29, the product direction is a local Tauri desktop app with a
+localhost-only FastAPI sidecar. Discord should become a lightweight remote
+control and notification adapter, not the owner of the main workflow.
+
 ## Phase 1: Implemented
 
 ### Local Codex CLI Integration
@@ -80,6 +84,9 @@ codex exec resume <session_id> -
 ### Current Main Files
 
 - `main.py`: local CLI orchestrator
+- `app_services.py`: UI-agnostic local service layer for run/config/event/artifact/action access
+- `local_api.py`: FastAPI adapter over the local service layer
+- `run_local_api.py`: localhost-only API server runner
 - `discord_bot.py`: Discord slash command entrypoint
 - `dashboard.py`: Streamlit local run control panel for planning/contract/scaffold tests
 - `debate_engine.py`: Planner A/B debate, contract approval, parallel development, QA routing
@@ -101,9 +108,88 @@ codex exec resume <session_id> -
   skills without running the gstack installer or source scripts
 - `workspace_manager.py`: run folder and generated app folder helpers
 - `config.py`: environment variable configuration
+- `ux/`: React/Vite UI connected to the local API, with a Tauri desktop shell scaffold
+
+## Current Local App/API Snapshot
+
+Completed so far:
+
+- Added a UI-agnostic service layer in `app_services.py`:
+  - `RunService` for creating/listing runs and recording approve/cancel/change actions.
+  - `ArtifactService` for safe run artifact listing and file reads.
+  - `EventService` for converting `events.jsonl` into timeline DTOs.
+  - `ConfigService` for routing modes, defaults, provider display, Codex homes,
+    model, reasoning effort, and reference profiles.
+- Added `local_api.py` and `run_local_api.py` as the local-only FastAPI adapter.
+- Added React/Vite entry files and replaced the prototype UX mock wiring with
+  API calls for config, runs, events, artifacts, and approval actions.
+- Added a Tauri scaffold under `ux/src-tauri/` for the future desktop shell.
+- Added local provider/account display:
+  - `CODEX_HOME`
+  - `PLANNER_*_CODEX_HOME`
+  - `ARCHITECT_CODEX_HOME`
+  - `SCAFFOLD_CODEX_HOME`
+  - `CODE_AGENT_CODEX_HOMES`
+  - `QA_AGENT_CODEX_HOMES`
+- Added safe `.env` loading for non-secret local app defaults. Secret values
+  such as Discord tokens are not loaded by this service helper.
+- Created a local ignored `.env` on this machine that maps:
+  - `account_1` to `D:\codex_profiles\account_1`
+  - `account_2` to `D:\codex_profiles\account_2`
+- The local API currently reports both Codex accounts through `/config`.
+- The UI now shows the resolved Codex model and reasoning effort from env or
+  Codex config instead of a hardcoded default label.
+- The default prefilled request text was removed from the UI composer.
+- Manual mode now supports local UI add/toggle/delete for agents and passes
+  active Planner/Code/QA counts into `POST /runs`.
+- Fixed the app root height bug that caused a white gap when the viewport grew.
+- The latest checked validation passed:
+  - `python -m py_compile app_services.py local_dashboard_runner.py local_api.py run_local_api.py run_worker.py workflow_engine.py state_store.py`
+  - `python -m unittest discover -s tests`
+  - `npm run build` from `ux/`
+
+Still partial:
+
+- `POST /runs` is connected to the existing local dashboard runner, so it is
+  useful for planning/contract/scaffold-stage testing but is not yet the final
+  long-running workflow engine.
+- Approve, request changes, QA approve, QA fix, and cancel are persisted through
+  the API, but approve/fix actions do not yet advance the full implementation
+  pipeline from the app.
+- Manual mode agent cards currently affect supported role counts. They are not
+  yet a full agent registry with per-agent prompts, models, accounts, and
+  execution ownership.
+- Tauri scaffolding exists, but Windows `.exe` packaging is not verified because
+  Rust/Cargo and the Python sidecar packaging path still need to be installed
+  and finalized.
+
+FastAPI run worker Stage 1 is complete for the first worker slice:
+
+- Added `run_worker.py` with an in-process `asyncio.Queue`, `RunJob`, active
+  job registry, per-run locks, and job dispatch for planning, plan approval,
+  plan revision, and cancellation.
+- Added `workflow_engine.py` as the non-Discord workflow stage owner for local
+  planning execution and development-queued checkpoints.
+- Extended `state_store.py` with `active_step`, `control`, and `workflow`
+  helpers while keeping older run state readable.
+- Changed local API run creation so `POST /runs` creates run state quickly,
+  records routing/workflow/config, sets `planning_queued`, and enqueues
+  background planning instead of blocking on Codex planning.
+- Changed approve/request-changes/cancel service methods so they validate state,
+  persist approval/control events, and enqueue the next worker job when the
+  FastAPI worker is available.
+- Added worker-focused tests using a fake workflow engine.
+- Verified on 2026-04-30 with Python compile checks, the unittest suite, and
+  the React/Vite production build.
 
 ## Known Limitations
 
+- The new local API now creates run state quickly and enqueues planning through
+  the FastAPI run worker. Contract/scaffold/full code/integration/QA execution
+  is still not fully owned by the worker; those deeper orchestration methods
+  still need to be decoupled from Discord channel/interaction objects.
+- Tauri scaffolding is present, but local packaging requires Rust/Cargo,
+  Node dependencies, and FastAPI dependencies to be installed on the machine.
 - The Discord approval path no longer always uses the full contract/scaffold/
   parallel-code/integrator/QA-agent pipeline. Route selection is currently
   explicit through configuration rather than a natural-language router.
@@ -130,6 +216,51 @@ codex exec resume <session_id> -
   Markdown files to agent prompts; it does not run source scripts or installers.
 
 ## Immediate Priorities
+
+### 0. Recommended Completion Sequence
+
+Complete the product in this order:
+
+1. Build the Stage 2 streaming and interruptible Codex runner.
+   - Add an async Codex process runner that streams stdout/stderr to log files.
+   - Track PID/process handles in `active_step` so cancel can stop active Codex
+     subprocesses.
+   - Emit heartbeat/progress events while long-running Codex calls execute.
+   - Support soft interrupt by storing feedback for the next safe checkpoint.
+   - Support hard interrupt by terminating the active process tree and marking
+     the run interrupted or cancelled.
+2. Decouple full code, revision, and QA flows from Discord.
+   - Move Discord-owned orchestration code into shared service methods.
+   - Keep Discord as an adapter that calls the same service layer used by the
+   app and future CLI.
+   - Preserve Discord buttons and text summaries, but make the app capable of
+   the same approve/request-change/cancel/QA-fix actions.
+3. Finish the remaining worker migration.
+   - Persist state transitions for contract, scaffold, code, integration, QA,
+     fix, and completion.
+   - Add worker jobs for starting/continuing after approval and running fixes
+     after change requests.
+   - Reuse the Stage 2 process runner for all Codex-backed stages.
+4. Strengthen generic executable QA.
+   - Prefer `codex_app_manifest.json` when present.
+   - Add safe manifest validation and command execution with timeouts and logs.
+   - Use framework adapters for Python, Node/Vite/React, static HTML, and CLI
+     projects when the manifest is missing.
+   - Add Playwright browser checks for web apps: page load, blank screen,
+     console errors, screenshot capture, and basic interaction probes.
+5. Finish the desktop app packaging path.
+   - Install Rust/Cargo for Tauri builds.
+   - Decide whether the Python API sidecar runs from source in dev and from a
+     PyInstaller-built executable in production.
+   - Make Tauri choose a free local port, inject it into the UI, and stop the
+     sidecar on app exit.
+   - Verify Windows `.exe` packaging after the backend worker is stable.
+6. Polish app UX on top of the stable backend.
+   - Run graph and stage controls.
+   - Full artifact preview/editor.
+   - Per-agent account/model/reasoning selection.
+   - Real manual-mode agent registry.
+   - Better run history and status filtering.
 
 ### 1. Routing Core Before More UI
 

@@ -22,6 +22,11 @@ runs/
 reference_packs/gstack_src/
 reference_packs/karpathy_src/
 
+# Frontend and desktop build artifacts
+ux/node_modules/
+ux/dist/
+ux/src-tauri/target/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

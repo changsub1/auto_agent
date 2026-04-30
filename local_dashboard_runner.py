@@ -46,7 +46,7 @@ class LocalRunConfig:
             run_mode="planning_only",
             planner_count=2,
             code_agent_count=_int_env("CODE_AGENT_COUNT", 2),
-            qa_agent_count=0,
+            qa_agent_count=_int_env("QA_AGENT_COUNT", 0),
             planner_a_codex_home=_str_env("PLANNER_A_CODEX_HOME"),
             planner_b_codex_home=_str_env("PLANNER_B_CODEX_HOME"),
             planner_c_codex_home=_str_env("PLANNER_C_CODEX_HOME"),
@@ -78,10 +78,11 @@ def run_local_dashboard_workflow(project_root: Path, config: LocalRunConfig) -> 
         discord={"source": "streamlit_dashboard"},
         max_fix_iterations=config.max_fix_iterations,
         code_agent_count=config.code_agent_count,
+        qa_agent_count=config.qa_agent_count,
     )
     _record_dashboard_config(store, config)
 
-    plan_artifacts = _run_planning(run_dir, logs_dir, store, config)
+    plan_artifacts = run_planning_stage(run_dir, logs_dir, store, config)
     if config.run_mode == "planning_only":
         store.set_status("dashboard_planning_completed")
         return run_dir
@@ -96,13 +97,25 @@ def run_local_dashboard_workflow(project_root: Path, config: LocalRunConfig) -> 
     return run_dir
 
 
-def _run_planning(
+def run_planning_stage(
     run_dir: Path,
     logs_dir: Path,
     store: StateStore,
     config: LocalRunConfig,
+    *,
+    user_feedback: str | None = None,
+    running_status: str = "dashboard_planning_running",
 ) -> dict[str, str]:
-    store.set_status("dashboard_planning_running")
+    store.set_status(running_status)
+    planning_request = config.user_request
+    if user_feedback:
+        planning_request = "\n\n".join(
+            [
+                config.user_request,
+                "User revision feedback:",
+                user_feedback,
+            ]
+        )
     planner_a = PlannerAgentA(
         codex_home=config.planner_a_codex_home,
         logs_dir=logs_dir,
@@ -110,7 +123,7 @@ def _run_planning(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    draft_result = planner_a.create_initial_plan(config.user_request, run_dir)
+    draft_result = planner_a.create_initial_plan(planning_request, run_dir)
     draft_path = store.write_artifact(
         "planning/01_planner_a_draft.md",
         draft_result.stdout,
@@ -136,7 +149,12 @@ def _run_planning(
             model=config.model,
             reasoning_effort=config.reasoning_effort,
         )
-        review_result = planner_b.review_plan(config.user_request, draft_result.stdout, run_dir)
+        review_result = planner_b.review_plan(
+            config.user_request,
+            draft_result.stdout,
+            run_dir,
+            user_feedback=user_feedback,
+        )
         review_text = review_result.stdout
         review_path = store.write_artifact(
             "planning/02_planner_b_review.md",
@@ -185,6 +203,7 @@ def _run_planning(
             draft_result.stdout,
             review_text,
             run_dir,
+            user_feedback=user_feedback,
         )
         final_text = final_result.stdout
         store.update_agent_session(

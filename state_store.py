@@ -56,6 +56,9 @@ class StateStore:
             "agent_sessions": agent_sessions,
             "artifacts": {},
             "approval_history": [],
+            "active_step": _empty_active_step(),
+            "control": _empty_control(),
+            "workflow": {"mode": "balanced", "stages": []},
         }
         self.save(state)
         self.append_event("run_created", "system", "Run created", {"discord": discord or {}})
@@ -78,6 +81,83 @@ class StateStore:
         state["status"] = status
         self.save(state)
         self.append_event("status_changed", "system", status)
+        return state
+
+    def set_active_step(
+        self,
+        *,
+        stage: str,
+        agent_id: str | None = None,
+        pid: int | None = None,
+        interruptible: bool = False,
+    ) -> dict[str, Any]:
+        state = self.load()
+        state["active_step"] = {
+            "stage": stage,
+            "agent_id": agent_id,
+            "pid": pid,
+            "started_at": _now(),
+            "interruptible": interruptible,
+        }
+        self.save(state)
+        self.append_event(
+            "active_step_changed",
+            "system",
+            f"{stage} started",
+            {
+                "stage": stage,
+                "agent_id": agent_id,
+                "pid": pid,
+                "interruptible": interruptible,
+            },
+        )
+        return state
+
+    def clear_active_step(self) -> dict[str, Any]:
+        state = self.load()
+        state["active_step"] = _empty_active_step()
+        self.save(state)
+        self.append_event("active_step_changed", "system", "active step cleared")
+        return state
+
+    def request_control_action(
+        self,
+        *,
+        action: str,
+        requested_by: int | str,
+        feedback: str | None = None,
+    ) -> dict[str, Any]:
+        state = self.load()
+        state["control"] = {
+            "requested_action": action,
+            "feedback": feedback or "",
+            "requested_by": str(requested_by),
+            "requested_at": _now(),
+        }
+        self.save(state)
+        self.append_event(
+            "control_requested",
+            "user",
+            action,
+            {
+                "requested_by": str(requested_by),
+                "feedback": feedback or "",
+            },
+        )
+        return state
+
+    def clear_control_action(self) -> dict[str, Any]:
+        state = self.load()
+        state["control"] = _empty_control()
+        self.save(state)
+        self.append_event("control_requested", "system", "control cleared")
+        return state
+
+    def set_workflow(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        state = self.load()
+        state["workflow"] = workflow
+        self.save(state)
+        self.append_event("workflow_saved", "system", "Workflow saved", workflow)
         return state
 
     def update_discord(self, **values: Any) -> dict[str, Any]:
@@ -180,3 +260,22 @@ class StateStore:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _empty_active_step() -> dict[str, Any]:
+    return {
+        "stage": None,
+        "agent_id": None,
+        "pid": None,
+        "started_at": None,
+        "interruptible": False,
+    }
+
+
+def _empty_control() -> dict[str, Any]:
+    return {
+        "requested_action": "none",
+        "feedback": "",
+        "requested_by": "",
+        "requested_at": None,
+    }
