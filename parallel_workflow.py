@@ -290,9 +290,14 @@ def list_workspace_files(path: Path) -> str:
 def _default_contract_files(user_request: str, final_plan: str) -> dict[str, str]:
     return {
         "requirements.md": f"# Requirements\n\n## User Request\n\n{user_request}\n\n## Approved Plan\n\n{final_plan}\n",
-        "architecture.md": "# Architecture\n\nUse a small local Python app with clear module boundaries.\n",
+        "architecture.md": (
+            "# Architecture\n\n"
+            "Use the simplest local stack that fits the approved plan. Preserve the user's requested "
+            "language or framework when specified; otherwise choose a conventional project shape and "
+            "record the runtime, entrypoint, and verification commands in `codex_app_manifest.json`.\n"
+        ),
         "api_contract.md": "# API Contract\n\nNo external API is required unless the approved plan explicitly says otherwise.\n",
-        "data_model.md": "# Data Model\n\nDefine lightweight Python data structures where useful.\n",
+        "data_model.md": "# Data Model\n\nDefine lightweight data structures appropriate for the chosen stack where useful.\n",
         "file_ownership.md": "# File Ownership\n\nEach task in `task_manifest.json` owns its listed paths.\n",
         "acceptance_tests.md": "# Acceptance Tests\n\nThe generated app should run locally and satisfy the approved plan.\n",
         "integration_plan.md": "# Integration Plan\n\nMerge owned task outputs first, then connect shared entrypoints.\n",
@@ -307,24 +312,50 @@ def _fallback_task_manifest(user_request: str) -> dict[str, Any]:
             {
                 "id": "T1",
                 "title": "Core app implementation",
-                "summary": f"Implement the main local Python app behavior for: {user_request}",
+                "summary": f"Implement the main local app behavior for: {user_request}",
                 "dependencies": [],
-                "owned_paths": ["app.py"],
-                "allowed_shared_paths": ["README.md", "requirements.txt"],
+                "owned_paths": [
+                    "src/",
+                    "app/",
+                    "public/",
+                    "index.html",
+                    "package.json",
+                    "pyproject.toml",
+                    "Cargo.toml",
+                    "go.mod",
+                    "main.py",
+                    "main.go",
+                ],
+                "allowed_shared_paths": ["README.md", "codex_app_manifest.json"],
                 "forbidden_paths": ["contract/", "runs/", "agent_workspaces/"],
-                "interfaces": [],
+                "interfaces": ["Use conventional entrypoints and dependency files for the chosen stack."],
                 "acceptance_criteria": ["The app can be launched locally.", "Core user workflow is implemented."],
             },
             {
                 "id": "T2",
-                "title": "Documentation, dependencies, and tests",
-                "summary": "Add run instructions, minimal dependencies, and basic validation tests if practical.",
+                "title": "Run manifest, documentation, and validation",
+                "summary": "Add run instructions, minimal dependencies, a safe execution manifest, and basic validation tests if practical.",
                 "dependencies": [],
-                "owned_paths": ["README.md", "requirements.txt", "tests/test_app.py"],
-                "allowed_shared_paths": ["app.py"],
+                "owned_paths": ["README.md", "codex_app_manifest.json", "tests/"],
+                "allowed_shared_paths": [
+                    "src/",
+                    "app/",
+                    "public/",
+                    "index.html",
+                    "package.json",
+                    "pyproject.toml",
+                    "Cargo.toml",
+                    "go.mod",
+                    "main.py",
+                    "main.go",
+                ],
                 "forbidden_paths": ["contract/", "runs/", "agent_workspaces/"],
-                "interfaces": [],
-                "acceptance_criteria": ["README includes run commands.", "Dependencies are minimal."],
+                "interfaces": ["Commands in codex_app_manifest.json must be JSON arrays, not shell strings."],
+                "acceptance_criteria": [
+                    "README includes setup, run, and verification commands.",
+                    "Dependencies are minimal.",
+                    "codex_app_manifest.json declares safe local checks.",
+                ],
             },
         ],
     }

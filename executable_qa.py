@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -46,6 +47,10 @@ def run_executable_qa(
     app_dir = Path(app_dir)
     qa_dir = Path(qa_dir)
     qa_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = app_dir / "codex_app_manifest.json"
+    if manifest_path.exists():
+        return _run_manifest_probe(app_dir, qa_dir, manifest_path, attempt_name=attempt_name, timeout=timeout)
 
     target = _detect_target(app_dir, allow_local_commands=allow_local_commands)
     if target["kind"] == "static_html":
@@ -105,6 +110,434 @@ def _detect_target(app_dir: Path, *, allow_local_commands: bool) -> dict[str, An
             }
 
     return {"kind": "skip", "app_type": "unknown", "reason": "No index.html, Streamlit app, CLI app, or allowed launcher was found."}
+
+
+def _run_manifest_probe(
+    app_dir: Path,
+    qa_dir: Path,
+    manifest_path: Path,
+    *,
+    attempt_name: str,
+    timeout: int,
+) -> ExecutableQAResult:
+    artifact_paths: list[Path] = [manifest_path]
+    screenshots: list[Path] = []
+    errors: list[str] = []
+    details: list[str] = []
+    executed_steps = 0
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return _manifest_failure(
+            app_dir,
+            qa_dir,
+            attempt_name=attempt_name,
+            app_type="manifest_invalid",
+            details=f"Invalid codex_app_manifest.json: {exc}",
+            artifact_paths=artifact_paths,
+        )
+
+    validation_errors = _validate_manifest(manifest, app_dir)
+    app_type = str(manifest.get("app_type") or manifest.get("runtime") or "manifest")
+    if validation_errors:
+        return _manifest_failure(
+            app_dir,
+            qa_dir,
+            attempt_name=attempt_name,
+            app_type=app_type,
+            details="\n".join(f"- {error}" for error in validation_errors),
+            artifact_paths=artifact_paths,
+        )
+
+    workdir = _manifest_workdir(app_dir, manifest)
+    command_timeout = _int_value(manifest.get("timeout_seconds"), timeout)
+
+    for group_name in ("setup", "checks", "smoke"):
+        for index, step in enumerate(_manifest_steps(manifest.get(group_name)), start=1):
+            result = _run_manifest_command(
+                workdir,
+                qa_dir,
+                step,
+                label=f"manifest_{group_name}_{index:02d}",
+                default_timeout=command_timeout,
+            )
+            artifact_paths.extend(result["artifacts"])
+            details.append(result["detail"])
+            executed_steps += 1
+            if result["error"]:
+                errors.append(result["error"])
+
+    if not errors:
+        run_spec = manifest.get("run")
+        if isinstance(run_spec, dict) and run_spec.get("command"):
+            run_result = _run_manifest_run_command(
+                workdir,
+                qa_dir,
+                run_spec,
+                app_type=app_type,
+                attempt_name=attempt_name,
+                default_timeout=command_timeout,
+            )
+            artifact_paths.extend(run_result.artifact_paths)
+            screenshots.extend(run_result.screenshots)
+            details.append(run_result.report_markdown)
+            executed_steps += 1
+            if run_result.status == "FAIL":
+                errors.append(run_result.error_log or "Manifest run command failed.")
+
+    if executed_steps == 0 and not errors:
+        return _skipped_result(
+            app_dir,
+            qa_dir,
+            attempt_name=attempt_name,
+            app_type=app_type,
+            reason="codex_app_manifest.json exists but declares no executable setup, check, smoke, or run commands.",
+            artifact_paths=artifact_paths,
+        )
+
+    status = "FAIL" if errors else "PASS"
+    report = _build_report(
+        attempt_name=attempt_name,
+        app_dir=app_dir,
+        app_type=app_type,
+        status=status,
+        command=[],
+        screenshots=screenshots,
+        artifact_paths=artifact_paths,
+        details=_manifest_details(manifest, details, errors),
+    )
+    report_path = _write_report(qa_dir, report)
+    return ExecutableQAResult(
+        ok=status == "PASS",
+        status=status,
+        app_type=app_type,
+        report_path=report_path,
+        report_markdown=report,
+        screenshots=screenshots,
+        artifact_paths=artifact_paths,
+        error_log="\n".join(errors),
+    )
+
+
+def _run_manifest_run_command(
+    workdir: Path,
+    qa_dir: Path,
+    run_spec: dict[str, Any],
+    *,
+    app_type: str,
+    attempt_name: str,
+    default_timeout: int,
+) -> ExecutableQAResult:
+    command = _command_list(run_spec.get("command"))
+    assert command is not None
+    timeout = _int_value(run_spec.get("timeout_seconds"), default_timeout)
+    ready_url = run_spec.get("ready_url")
+    if not ready_url:
+        return _run_process_probe(
+            workdir,
+            qa_dir,
+            command=command,
+            app_type=f"{app_type}_run",
+            attempt_name=f"{attempt_name} manifest run",
+            timeout=timeout,
+        )
+
+    runtime_log = qa_dir / "manifest_run_runtime.log"
+    with runtime_log.open("w", encoding="utf-8", errors="replace") as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=str(workdir),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            shell=False,
+        )
+        try:
+            if not _wait_for_http(str(ready_url), timeout=min(timeout, 45)):
+                error_log = f"Manifest run command did not become reachable at {ready_url} within the timeout."
+                report = _build_report(
+                    attempt_name=f"{attempt_name} manifest run",
+                    app_dir=workdir,
+                    app_type=app_type,
+                    status="FAIL",
+                    command=command,
+                    screenshots=[],
+                    artifact_paths=[runtime_log],
+                    details=error_log,
+                )
+                report_path = _write_report(qa_dir, report)
+                return ExecutableQAResult(
+                    ok=False,
+                    status="FAIL",
+                    app_type=app_type,
+                    report_path=report_path,
+                    report_markdown=report,
+                    artifact_paths=[runtime_log],
+                    error_log=error_log,
+                    command=command,
+                )
+            return _run_browser_probe(
+                workdir,
+                qa_dir,
+                url=str(ready_url),
+                app_type=app_type,
+                attempt_name=f"{attempt_name} manifest browser probe",
+                timeout=timeout,
+                command=command,
+                extra_artifacts=[runtime_log],
+            )
+        finally:
+            _terminate_process(process)
+
+
+def _run_manifest_command(
+    workdir: Path,
+    qa_dir: Path,
+    step: dict[str, Any],
+    *,
+    label: str,
+    default_timeout: int,
+) -> dict[str, Any]:
+    command = _command_list(step.get("command"))
+    assert command is not None
+    timeout = _int_value(step.get("timeout_seconds"), default_timeout)
+    safe_label = _safe_label(str(step.get("name") or label))
+    stdout_path = qa_dir / f"{safe_label}_stdout.txt"
+    stderr_path = qa_dir / f"{safe_label}_stderr.txt"
+    error = ""
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+        )
+        stdout_path.write_text(result.stdout or "", encoding="utf-8", errors="replace")
+        stderr_path.write_text(result.stderr or "", encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            error = f"{safe_label} returned exit code {result.returncode}."
+    except subprocess.TimeoutExpired as exc:
+        stdout_path.write_text(_safe_process_text(exc.stdout), encoding="utf-8", errors="replace")
+        stderr_path.write_text(_safe_process_text(exc.stderr), encoding="utf-8", errors="replace")
+        error = f"{safe_label} timed out after {timeout} seconds."
+
+    detail = "\n".join(
+        [
+            f"### {safe_label}",
+            "",
+            f"- Command: `{' '.join(command)}`",
+            f"- Timeout: {timeout}s",
+            f"- Status: {'FAIL' if error else 'PASS'}",
+            f"- stdout: `{stdout_path}`",
+            f"- stderr: `{stderr_path}`",
+            f"- Error: {error or 'None'}",
+            "",
+        ]
+    )
+    return {"artifacts": [stdout_path, stderr_path], "detail": detail, "error": error}
+
+
+def _validate_manifest(manifest: Any, app_dir: Path) -> list[str]:
+    if not isinstance(manifest, dict):
+        return ["Manifest root must be a JSON object."]
+
+    errors: list[str] = []
+    workdir_raw = manifest.get("working_directory", ".")
+    if not isinstance(workdir_raw, str):
+        errors.append("working_directory must be a string.")
+    else:
+        try:
+            _manifest_workdir(app_dir, manifest)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    for group_name in ("setup", "checks", "smoke"):
+        raw_steps = manifest.get(group_name, [])
+        if raw_steps in (None, ""):
+            continue
+        if not isinstance(raw_steps, list):
+            errors.append(f"{group_name} must be a list.")
+            continue
+        for index, step in enumerate(raw_steps, start=1):
+            errors.extend(_validate_manifest_step(step, f"{group_name}[{index}]"))
+
+    run_spec = manifest.get("run")
+    if run_spec not in (None, ""):
+        if not isinstance(run_spec, dict):
+            errors.append("run must be an object.")
+        else:
+            errors.extend(_validate_manifest_step(run_spec, "run"))
+            ready_url = run_spec.get("ready_url")
+            if ready_url is not None and not _safe_local_url(str(ready_url)):
+                errors.append("run.ready_url must be a local http://127.0.0.1, http://localhost, or file:// URL.")
+
+    return errors
+
+
+def _validate_manifest_step(step: Any, label: str) -> list[str]:
+    if not isinstance(step, dict):
+        return [f"{label} must be an object."]
+    command = _command_list(step.get("command"))
+    if command is None:
+        return [f"{label}.command must be a non-empty JSON array of strings."]
+    errors = _validate_command(command, label)
+    timeout = step.get("timeout_seconds")
+    if timeout is not None:
+        try:
+            parsed = int(timeout)
+            if parsed <= 0 or parsed > 1800:
+                errors.append(f"{label}.timeout_seconds must be between 1 and 1800.")
+        except (TypeError, ValueError):
+            errors.append(f"{label}.timeout_seconds must be an integer.")
+    return errors
+
+
+def _validate_command(command: list[str], label: str) -> list[str]:
+    errors: list[str] = []
+    executable = command[0]
+    executable_name = Path(executable).name.lower()
+    allowed = {
+        "python",
+        "python.exe",
+        "py",
+        "py.exe",
+        "node",
+        "node.exe",
+        "npm",
+        "npm.cmd",
+        "npx",
+        "npx.cmd",
+        "pnpm",
+        "pnpm.cmd",
+        "yarn",
+        "yarn.cmd",
+        "bun",
+        "bun.exe",
+        "go",
+        "go.exe",
+        "cargo",
+        "cargo.exe",
+        "rustc",
+        "rustc.exe",
+        "dotnet",
+        "dotnet.exe",
+        "java",
+        "java.exe",
+        "mvn",
+        "mvn.cmd",
+        "gradle",
+        "gradle.bat",
+        "gradlew",
+        "gradlew.bat",
+        "uv",
+        "uv.exe",
+        "pytest",
+        "pytest.exe",
+    }
+    if executable != sys.executable and executable_name not in allowed:
+        errors.append(f"{label}.command executable is not allowlisted: {executable}")
+    for part in command:
+        if _has_shell_control(part):
+            errors.append(f"{label}.command contains shell control syntax: {part}")
+            break
+    return errors
+
+
+def _command_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    return [str(item) for item in value]
+
+
+def _manifest_workdir(app_dir: Path, manifest: dict[str, Any]) -> Path:
+    raw = str(manifest.get("working_directory") or ".")
+    workdir = (app_dir / raw).resolve()
+    app_root = app_dir.resolve()
+    try:
+        workdir.relative_to(app_root)
+    except ValueError as exc:
+        raise ValueError("working_directory must stay inside the generated app directory.") from exc
+    if not workdir.exists() or not workdir.is_dir():
+        raise ValueError(f"working_directory does not exist: {raw}")
+    return workdir
+
+
+def _manifest_steps(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _manifest_failure(
+    app_dir: Path,
+    qa_dir: Path,
+    *,
+    attempt_name: str,
+    app_type: str,
+    details: str,
+    artifact_paths: list[Path],
+) -> ExecutableQAResult:
+    report = _build_report(
+        attempt_name=attempt_name,
+        app_dir=app_dir,
+        app_type=app_type,
+        status="FAIL",
+        command=[],
+        screenshots=[],
+        artifact_paths=artifact_paths,
+        details=details,
+    )
+    report_path = _write_report(qa_dir, report)
+    return ExecutableQAResult(
+        ok=False,
+        status="FAIL",
+        app_type=app_type,
+        report_path=report_path,
+        report_markdown=report,
+        artifact_paths=artifact_paths,
+        error_log=details,
+    )
+
+
+def _manifest_details(manifest: dict[str, Any], details: list[str], errors: list[str]) -> str:
+    summary = [
+        f"- Manifest runtime: `{manifest.get('runtime', 'unknown')}`",
+        f"- Manifest app type: `{manifest.get('app_type', 'unknown')}`",
+        "",
+        "Errors:",
+        "\n".join(f"- {error}" for error in errors) if errors else "- None",
+        "",
+        "Step details:",
+        "\n".join(details).strip() or "- No commands declared.",
+    ]
+    return "\n".join(summary)
+
+
+def _safe_label(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")[:80] or "manifest_step"
+
+
+def _has_shell_control(value: str) -> bool:
+    return any(token in value for token in ["&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r"])
+
+
+def _safe_local_url(value: str) -> bool:
+    return (
+        value.startswith("http://127.0.0.1:")
+        or value.startswith("http://localhost:")
+        or value.startswith("file://")
+    )
+
+
+def _int_value(value: Any, default: int) -> int:
+    if value in (None, ""):
+        return int(default)
+    return int(value)
 
 
 def _run_static_html_probe(

@@ -8,7 +8,7 @@ instead of using an OpenAI API key or OpenAI SDK directly.
 
 The current system can receive a development request, let multiple Codex-backed
 agents discuss the plan, ask a human for approval in Discord, and then generate
-a runnable Python app locally.
+a runnable local app.
 
 As of 2026-04-29, the product direction is a local Tauri desktop app with a
 localhost-only FastAPI sidecar. Discord should become a lightweight remote
@@ -34,8 +34,9 @@ codex exec --skip-git-repo-check --sandbox workspace-write --color never -
 - `main.py` accepts a user request from the terminal.
 - Planner Agent creates a planning document.
 - Developer Agent generates an app under `runs/<timestamp>/generated_app`.
-- QA runs `python -m py_compile` against generated Python files.
-- If syntax QA fails, Developer Agent receives the error log and gets one or more fix attempts.
+- Mechanical QA runs language-neutral executable checks when a manifest or safe
+  adapter is available, with Python syntax checks kept as one adapter.
+- If mechanical QA fails, Developer Agent receives the error log and gets one or more fix attempts.
 
 ### Discord Human-in-the-loop MVP
 
@@ -98,7 +99,7 @@ codex exec resume <session_id> -
 - `discord_ui.py`: approval buttons and revision modal
 - `discord_reporter.py`: Discord message helpers
 - `executable_qa.py`: generated app execution probes, screenshots, and runtime logs
-- `qa.py`: mechanical QA result composition and Python syntax QA
+- `qa.py`: mechanical QA result composition, including the Python syntax adapter
 - `routing.py`: deterministic route selection for fast, balanced, parallel, and manual runs
 - `reference_packs.py`: copies curated reference packs into each run and loads
   role-specific `pack/role` guidance for agent prompts
@@ -203,9 +204,10 @@ FastAPI run worker Stage 1 is complete for the first worker slice:
 - QA now has a first executable-probe slice for static HTML, Streamlit, CLI,
   and opt-in Windows launcher checks. Broader GUI automation and app-specific
   assertions are still limited.
-- Executable QA still relies mostly on detection heuristics. It should prefer a
-  generated `codex_app_manifest.json` that declares safe setup, test, smoke,
-  server, and browser checks in a language-neutral schema.
+- Executable QA now prefers a generated `codex_app_manifest.json` that declares
+  safe setup, test, smoke, server, and browser checks in a language-neutral
+  schema. Framework detection remains as a fallback when the manifest is
+  missing.
 - Codex-backed QA Agent review is implemented after mechanical QA. It can use
   the configured QA `CODEX_HOME`, model, reasoning effort, QA report, contract,
   generated app listing, and attached screenshots.
@@ -242,8 +244,8 @@ Complete the product in this order:
      after change requests.
    - Reuse the Stage 2 process runner for all Codex-backed stages.
 4. Strengthen generic executable QA.
-   - Prefer `codex_app_manifest.json` when present.
-   - Add safe manifest validation and command execution with timeouts and logs.
+   - Expand the initial manifest runner with richer schema coverage and
+     environment handling.
    - Use framework adapters for Python, Node/Vite/React, static HTML, and CLI
      projects when the manifest is missing.
    - Add Playwright browser checks for web apps: page load, blank screen,

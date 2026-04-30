@@ -23,6 +23,13 @@ def _reference_block(reference_markdown: str | None) -> str:
     ).strip()
 
 
+MANIFEST_CONTRACT_NOTE = (
+    "Final runnable outputs must include codex_app_manifest.json. "
+    "Follow docs/CODEX_APP_MANIFEST.md. "
+    "Commands must be JSON arrays, not shell strings."
+)
+
+
 class PlannerAgent:
     """Backward-compatible single planner used by the CLI MVP."""
 
@@ -105,11 +112,13 @@ class PlannerAgentA:
 
             Constraints:
             - Keep the app small and executable.
-            - Prefer Python.
-            - Prefer Streamlit only when it fits the request.
+            - Choose the simplest local implementation stack that fits the user request.
+            - If the user did not specify a stack, pick one and state why.
+            - Prefer standard project conventions for the chosen stack.
             - Avoid external APIs.
             - Avoid storing personal information.
             - Keep dependencies minimal.
+            - Include the expected runtime, entrypoint, run command, and verification approach.
 
             Start the response with "# Planner A Draft".
             """
@@ -149,7 +158,8 @@ class PlannerAgentA:
 
             Requirements:
             - Resolve the review comments.
-            - Keep the scope realistic for a small executable Python MVP.
+            - Keep the scope realistic for a small executable local MVP.
+            - Preserve or clearly justify the chosen language, framework, and runtime.
             - Mention any explicit tradeoffs.
             - Do not ask follow-up questions.
             - Return only the final Markdown plan.
@@ -317,11 +327,13 @@ class ArchitectAgent:
 
             Contract rules:
             - Keep the MVP small and runnable locally.
-            - Prefer Python.
+            - Select or preserve the implementation stack from the approved plan.
+            - Use standard project layout and dependency files for the chosen stack.
             - Split work into 2 to 6 implementation tasks.
             - Design task boundaries so code agents can work in parallel.
             - Each task must have clear owned_paths that avoid overlap with other tasks.
             - Shared entrypoint files should be handled by the Integrator where possible.
+            - {MANIFEST_CONTRACT_NOTE}
             - Include dependencies between tasks only when necessary.
             - Do not require external APIs unless explicitly requested.
             - Do not store personal information.
@@ -404,12 +416,12 @@ class ScaffoldAgent:
             {contract_bundle}
 
             Requirements:
-            - Create a runnable Python project skeleton.
-            - Include app.py, requirements.txt, and README.md unless the contract says otherwise.
+            - Create the minimal project skeleton for the stack chosen in the contract.
+            - Include conventional dependency, config, and entrypoint files only when needed.
+            - Include README.md with the expected setup, run, and verification commands.
+            - {MANIFEST_CONTRACT_NOTE}
             - Add empty or minimal modules that match the contract boundaries.
             - Add placeholders only; do not implement feature-specific logic in full.
-            - Keep imports valid so Python syntax QA can run after integration.
-            - README.md must include the expected run command.
             - Keep dependencies minimal.
 
             When finished, print a short summary of files created.
@@ -482,6 +494,9 @@ class CodeAgent:
 
             Implementation rules:
             - Implement only the assigned tasks.
+            - Follow the language, framework, runtime, and project conventions declared
+              by the approved plan and contract.
+            - Do not change the chosen stack unless required; if you do, explain why.
             - Prefer editing owned_paths from your assignment.
             - Avoid editing allowed_shared_paths unless your task cannot work without it.
             - Never edit forbidden_paths.
@@ -489,9 +504,9 @@ class CodeAgent:
             - Keep the app runnable locally.
             - Keep dependencies minimal.
             - If you add tests, keep them lightweight and local.
-            - If your assignment produces a runnable app or a runnable slice,
-              create or update codex_app_manifest.json with safe local checks.
-              Commands in the manifest must be JSON arrays, not shell strings.
+            - If your assignment changes setup, run, test, smoke, server, or
+              browser behavior, update codex_app_manifest.json according to
+              docs/CODEX_APP_MANIFEST.md.
 
             When finished, print:
             1. Files changed
@@ -551,13 +566,16 @@ class CodeAgent:
             Fix iteration: {iteration}
 
             Rules:
+            - Follow the language, framework, runtime, and project conventions declared
+              by the approved plan and contract.
+            - Do not change the chosen stack unless required; if you do, explain why.
             - Prefer owned_paths from your assignment.
             - Edit allowed_shared_paths only when necessary.
             - Never edit forbidden_paths.
             - Keep public interfaces compatible with the contract.
             - Keep the app runnable locally.
-            - Update codex_app_manifest.json if the run, test, or smoke-check
-              command changes. Commands must be JSON arrays, not shell strings.
+            - Update codex_app_manifest.json according to docs/CODEX_APP_MANIFEST.md
+              if setup, run, test, smoke, server, or browser behavior changes.
 
             When finished, print:
             1. Files changed
@@ -636,14 +654,13 @@ class IntegratorAgent:
             {workspace_listing}
 
             Requirements:
-            - Ensure integration/merged_app is the final runnable Python app.
-            - Connect feature modules through the shared entrypoint.
+            - Ensure integration/merged_app is the final runnable local project.
+            - Preserve the chosen stack's conventional entrypoints and dependency files.
+            - Connect feature modules through the shared entrypoint when the stack uses one.
             - Resolve conflicts consistently with the contract.
             - Preserve useful tests and docs from code agents.
-            - Ensure app.py, requirements.txt, and README.md exist unless the contract says otherwise.
-            - Ensure codex_app_manifest.json exists in integration/merged_app and
-              describes safe local setup, test, smoke, server, or browser checks.
-              Commands in the manifest must be JSON arrays, not shell strings.
+            - Ensure README.md exists with setup, run, and verification instructions.
+            - {MANIFEST_CONTRACT_NOTE}
             - Keep dependencies minimal.
             - Do not write outside integration/merged_app.
 
@@ -707,8 +724,10 @@ class IntegratorAgent:
             Requirements:
             - Fix shared entrypoints, merge errors, missing files, or cross-agent integration bugs.
             - Do not overwrite a code agent's owned implementation unless needed to connect it.
-            - Keep app.py, requirements.txt, and README.md valid unless the contract says otherwise.
-            - Keep codex_app_manifest.json valid and aligned with the final runnable app.
+            - Preserve the chosen stack's conventional entrypoints and dependency files.
+            - Keep README.md valid and aligned with the final runnable project.
+            - Keep codex_app_manifest.json valid, aligned with the final runnable app,
+              and compliant with docs/CODEX_APP_MANIFEST.md.
             - Keep dependencies minimal.
             - Do not write outside integration/merged_app.
 
@@ -830,7 +849,7 @@ class QAAgent:
 
 
 class DeveloperAgent:
-    """Generates and fixes a runnable Python app from the approved plan."""
+    """Legacy single-agent app generator kept for the original CLI path."""
 
     def __init__(
         self,
@@ -874,15 +893,15 @@ class DeveloperAgent:
             {plan_markdown}
 
             Requirements:
-            - Create a runnable Python app in the current working folder.
-            - The default deliverables are app.py, requirements.txt, and README.md.
-            - Prefer Streamlit only when it fits the request.
-            - If the user asks for a local executable-style app, a small standard-library CLI,
-              Tkinter app, or launcher script is acceptable.
+            - Create a runnable local project in the current working folder.
+            - Choose the simplest language, framework, and runtime that fits the user request
+              and approved plan.
+            - Use conventional entrypoint and dependency files for the chosen stack.
             - Keep the MVP small.
             - Do not add external API calls.
             - Do not store personal information.
             - Write clear run instructions in README.md.
+            - {MANIFEST_CONTRACT_NOTE}
             - Keep dependencies minimal.
             - If you create Windows .bat or .cmd launchers, keep their contents ASCII-only.
 
@@ -936,7 +955,7 @@ class DeveloperAgent:
             Continue as Developer Agent.
             The generated app failed validation.
             Read the error log and modify files in the current working directory.
-            Keep the approved scope and make app.py runnable.
+            Keep the approved scope and make the generated project runnable.
             Do not ask for more input.
 
             User request:
@@ -953,6 +972,9 @@ class DeveloperAgent:
             Constraints:
             - Work only in the current working directory.
             - Do not modify files outside this generated_app directory.
+            - Preserve the chosen stack unless changing it is required to satisfy the approved scope.
+            - Keep codex_app_manifest.json valid, aligned with the final runnable
+              project, and compliant with docs/CODEX_APP_MANIFEST.md.
             - Do not add external API calls.
             - Do not store personal information.
             - Keep Windows .bat or .cmd launchers ASCII-only.

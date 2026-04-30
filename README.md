@@ -8,7 +8,7 @@ through Python `subprocess`.
 The original CLI flow is still available:
 
 ```text
-User request -> Planner Agent -> Developer Agent -> Python syntax QA
+User request -> Planner Agent -> Developer Agent -> mechanical QA
 ```
 
 The new Discord flow adds human-in-the-loop planning approval:
@@ -23,7 +23,7 @@ The new Discord flow adds human-in-the-loop planning approval:
   -> Scaffold Agent creates scaffold_app
   -> Code Agents implement isolated workspaces in parallel
   -> Integrator Agent merges generated_app
-  -> Python syntax QA
+  -> mechanical QA
 ```
 
 ## Requirements

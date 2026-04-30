@@ -8,7 +8,8 @@ from pathlib import Path
 
 from agents import DeveloperAgent, PlannerAgent
 from codex_runner import CodexExecutionError
-from qa import QAResult, run_python_syntax_check
+from executable_qa import run_executable_qa
+from qa import QAResult, combine_mechanical_qa_results, run_python_syntax_check
 from workspace_manager import (
     create_generated_app_dir,
     create_logs_dir,
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--max-fix-iterations",
         type=int,
         default=1,
-        help="Number of syntax-fix retries when generated Python files fail py_compile.",
+        help="Number of fix retries when mechanical QA fails.",
     )
     parser.add_argument(
         "request",
@@ -92,17 +93,19 @@ def main() -> int:
         developer.create_app(user_request, plan_markdown, generated_app_dir)
         normalize_windows_command_files(generated_app_dir)
 
-        print("Running Python syntax QA...")
-        qa_result = run_python_syntax_check(
+        print("Running mechanical QA...")
+        qa_result = _run_mechanical_qa(
             generated_app_dir,
+            run_dir,
             qa_report_path,
-            attempt_name="initial syntax check",
+            attempt_name="initial mechanical QA",
+            attempt_index=0,
         )
 
         fix_iterations_used = 0
         while not qa_result.ok and fix_iterations_used < args.max_fix_iterations:
             fix_iterations_used += 1
-            print(f"Syntax QA failed. Running Developer fix attempt {fix_iterations_used}...")
+            print(f"Mechanical QA failed. Running Developer fix attempt {fix_iterations_used}...")
             developer.fix_app(
                 user_request,
                 plan_markdown,
@@ -111,11 +114,12 @@ def main() -> int:
                 iteration=fix_iterations_used,
             )
             normalize_windows_command_files(generated_app_dir)
-            qa_result = run_python_syntax_check(
+            qa_result = _run_mechanical_qa(
                 generated_app_dir,
+                run_dir,
                 qa_report_path,
-                attempt_name=f"syntax check after fix {fix_iterations_used}",
-                append=True,
+                attempt_name=f"mechanical QA after fix {fix_iterations_used}",
+                attempt_index=fix_iterations_used,
             )
 
     except CodexExecutionError as exc:
@@ -182,8 +186,37 @@ def _print_summary(
     print(f"Plan: {plan_path}")
     print(f"Generated app: {generated_app_dir}")
     print(f"QA report: {qa_result.report_path}")
-    print(f"Syntax QA: {status}")
+    print(f"Mechanical QA: {status}")
     print(f"Fix iterations used: {fix_iterations_used}/{max_fix_iterations}")
+
+
+def _run_mechanical_qa(
+    generated_app_dir: Path,
+    run_dir: Path,
+    qa_report_path: Path,
+    *,
+    attempt_name: str,
+    attempt_index: int,
+) -> QAResult:
+    attempt_dir = run_dir / "qa" / f"attempt_{attempt_index:02d}"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    syntax_result = run_python_syntax_check(
+        generated_app_dir,
+        attempt_dir / "syntax_report.md",
+        attempt_name=f"{attempt_name} syntax adapter",
+        fail_on_missing_python=False,
+    )
+    executable_result = run_executable_qa(
+        generated_app_dir,
+        attempt_dir,
+        attempt_name=f"{attempt_name} executable probe",
+    )
+    return combine_mechanical_qa_results(
+        syntax_result=syntax_result,
+        executable_result=executable_result,
+        report_path=qa_report_path,
+        attempt_name=attempt_name,
+    )
 
 
 if __name__ == "__main__":
