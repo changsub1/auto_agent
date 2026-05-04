@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Callable
 
 from codex_runner import CodexProcessHandle
-from local_dashboard_runner import LocalRunConfig, run_planning_stage, run_planning_stage_async
+from local_dashboard_runner import (
+    LocalRunConfig,
+    run_contract_stage_async,
+    run_code_agents_stage_async,
+    run_integration_stage_async,
+    run_llm_qa_stage_async,
+    run_mechanical_qa_stage,
+    run_planning_stage,
+    run_planning_stage_async,
+    run_scaffold_stage_async,
+    run_targeted_fix_stage_async,
+)
 from routing import RoutingDecision
 from state_store import StateStore
 from workspace_manager import create_logs_dir
@@ -88,6 +100,185 @@ class WorkflowEngine:
                 return
             store.clear_control_action()
             store.set_status("awaiting_plan_approval")
+        finally:
+            store.clear_active_step()
+
+    async def run_development_async(
+        self,
+        run_id: str,
+        *,
+        process_started: Callable[[str, str, CodexProcessHandle], None] | None = None,
+    ) -> None:
+        run_dir = self._run_dir(run_id)
+        store = StateStore(run_dir)
+        if _is_cancelled(store.load()):
+            store.append_event("worker_skipped", "system", "Development skipped because run is cancelled")
+            return
+
+        config = local_config_from_state(store.load())
+        logs_dir = create_logs_dir(run_dir)
+        plan_artifacts = _load_plan_artifacts(run_dir, store.load())
+
+        def register_process(stage: str, agent_id: str, handle: CodexProcessHandle) -> None:
+            store.set_active_step(
+                stage=stage,
+                agent_id=agent_id,
+                pid=handle.pid,
+                interruptible=True,
+            )
+            if process_started is not None:
+                process_started(stage, agent_id, handle)
+
+        store.set_active_step(stage="contract", agent_id="architect", interruptible=True)
+        try:
+            contract_dir = await run_contract_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                plan_artifacts,
+                running_status="contract_running",
+                process_started=lambda agent_id, handle: register_process("contract", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            store.set_active_step(stage="scaffold", agent_id="scaffold", interruptible=True)
+            scaffold_dir = await run_scaffold_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                contract_dir,
+                running_status="scaffold_running",
+                process_started=lambda agent_id, handle: register_process("scaffold", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            assignments = await run_code_agents_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                contract_dir,
+                scaffold_dir,
+                running_status="code_agents_running",
+                process_started=lambda agent_id, handle: register_process("code_agents", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            generated_app_dir = await run_integration_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                contract_dir,
+                scaffold_dir,
+                assignments,
+                running_status="integration_running",
+                process_started=lambda agent_id, handle: register_process("integration", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+            qa_result = await asyncio.to_thread(
+                run_mechanical_qa_stage,
+                run_dir,
+                store,
+                generated_app_dir,
+                attempt_name="integrated mechanical QA",
+                attempt_index=0,
+            )
+            qa_result = await run_llm_qa_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                contract_dir,
+                generated_app_dir,
+                qa_result,
+                attempt_index=0,
+                process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            fix_iterations_used = 0
+            while not qa_result.ok and fix_iterations_used < config.max_fix_iterations:
+                fix_iterations_used += 1
+                store.append_event(
+                    "qa_failed",
+                    "qa",
+                    "QA failed",
+                    {
+                        "iteration": fix_iterations_used,
+                        "executable_status": qa_result.executable_status,
+                        "suspected_owners": qa_result.suspected_owners,
+                        "affected_paths": qa_result.affected_paths,
+                    },
+                )
+                generated_app_dir = await run_targeted_fix_stage_async(
+                    run_dir,
+                    logs_dir,
+                    store,
+                    config,
+                    contract_dir,
+                    scaffold_dir,
+                    assignments,
+                    qa_result,
+                    iteration=fix_iterations_used,
+                    process_started=lambda agent_id, handle: register_process("fix", agent_id, handle),
+                )
+                if _control_action(store.load()) == "cancel":
+                    store.set_status("cancelled")
+                    return
+
+                store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+                qa_result = await asyncio.to_thread(
+                    run_mechanical_qa_stage,
+                    run_dir,
+                    store,
+                    generated_app_dir,
+                    attempt_name=f"mechanical QA after fix {fix_iterations_used}",
+                    attempt_index=fix_iterations_used,
+                )
+                qa_result = await run_llm_qa_stage_async(
+                    run_dir,
+                    logs_dir,
+                    store,
+                    config,
+                    contract_dir,
+                    generated_app_dir,
+                    qa_result,
+                    attempt_index=fix_iterations_used,
+                    process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+                )
+                if _control_action(store.load()) == "cancel":
+                    store.set_status("cancelled")
+                    return
+
+            store.clear_control_action()
+            store.set_status("awaiting_qa_approval")
+            store.append_event(
+                "worker_checkpoint",
+                "system",
+                "Development and mechanical QA completed",
+                {
+                    "stage": "mechanical_qa",
+                    "qa_status": "PASS" if qa_result.ok else "FAIL",
+                    "executable_status": qa_result.executable_status,
+                    "executable_app_type": qa_result.executable_app_type,
+                    "fix_iterations_used": fix_iterations_used,
+                },
+            )
         finally:
             store.clear_active_step()
 
@@ -205,6 +396,64 @@ def _control_action(state: dict[str, Any]) -> str:
 
 def _is_cancelled(state: dict[str, Any]) -> bool:
     return state.get("status") == "cancelled" or _control_action(state) == "cancel"
+
+
+def _load_plan_artifacts(run_dir: Path, state: dict[str, Any]) -> dict[str, str]:
+    final_plan = _read_first_existing(
+        run_dir,
+        [
+            _artifact_relative_path(state, "final_plan"),
+            "planning/03_final_plan.md",
+            "plan.md",
+        ],
+    )
+    if not final_plan:
+        raise FileNotFoundError("Approved final plan artifact is missing.")
+
+    planner_a_draft = _read_first_existing(
+        run_dir,
+        [
+            _artifact_relative_path(state, "planner_a_draft"),
+            "planning/01_planner_a_draft.md",
+        ],
+    ) or final_plan
+    planner_review = _read_first_existing(
+        run_dir,
+        [
+            _artifact_relative_path(state, "planner_b_review"),
+            "planning/02_planner_b_review.md",
+        ],
+    ) or "(planner review unavailable)"
+    return {
+        "planner_a_draft": planner_a_draft,
+        "planner_review": planner_review,
+        "final_plan": final_plan,
+    }
+
+
+def _artifact_relative_path(state: dict[str, Any], name: str) -> str | None:
+    artifacts = state.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None
+    value = artifacts.get(name)
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _read_first_existing(run_dir: Path, relative_paths: list[str | None]) -> str:
+    root = run_dir.resolve()
+    for relative_path in relative_paths:
+        if not relative_path:
+            continue
+        path = (run_dir / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
 
 
 def _optional_str(value: Any) -> str | None:

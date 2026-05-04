@@ -475,12 +475,14 @@ class RunService:
 
     def approve_qa(self, run_id: str, action: OperatorActionRequest) -> RunDetail:
         store = StateStore(self._run_dir(run_id))
+        _require_status(store, run_id, {"awaiting_qa_approval"}, "waiting for QA approval")
         store.add_approval(action="qa_approved", user_id=action.user_id, feedback=action.feedback)
         store.set_status("completed")
         return self.get_run(run_id)
 
     def request_qa_fix(self, run_id: str, action: OperatorActionRequest) -> RunDetail:
         store = StateStore(self._run_dir(run_id))
+        _require_status(store, run_id, {"awaiting_qa_approval"}, "waiting for QA review")
         store.add_approval(action="qa_fix_requested", user_id=action.user_id, feedback=action.feedback)
         store.append_transcript("Local QA Fix Feedback", action.feedback or "(no feedback)")
         store.set_status("qa_fix_requested")
@@ -770,6 +772,13 @@ def _safe_run_dir(runs_root: Path, run_id: str) -> Path:
     if not run_dir.exists() or not run_dir.is_dir():
         raise FileNotFoundError(f"Run not found: {run_id}")
     return run_dir
+
+
+def _require_status(store: StateStore, run_id: str, allowed: set[str], description: str) -> None:
+    status = str(store.load().get("status") or "")
+    if status not in allowed:
+        expected = ", ".join(sorted(allowed))
+        raise ValueError(f"Run {run_id} is not {description}. Current status: {status or 'unknown'}; expected: {expected}.")
 
 
 def _safe_artifact_path(run_dir: Path, relative_path: str) -> Path:

@@ -415,7 +415,56 @@ class ArchitectAgent:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._contract_prompt(user_request, planner_a_draft, planner_b_review, final_plan)
+        return run_codex_result(
+            prompt,
+            workdir=contract_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="architect_contract",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def create_contract_bundle_result_async(
+        self,
+        user_request: str,
+        planner_a_draft: str,
+        planner_b_review: str,
+        final_plan: str,
+        contract_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._contract_prompt(user_request, planner_a_draft, planner_b_review, final_plan)
+        return await run_codex_result_async(
+            prompt,
+            workdir=contract_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="architect_contract",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _contract_prompt(
+        self,
+        user_request: str,
+        planner_a_draft: str,
+        planner_b_review: str,
+        final_plan: str,
+    ) -> str:
+        return dedent(
             f"""
             You are Architect Agent in a Codex CLI multi-agent development workflow.
             Create a contract bundle for parallel code agents. Do not ask follow-up questions.
@@ -477,19 +526,6 @@ class ArchitectAgent:
             When finished, print a concise summary of the contract and task split.
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=contract_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label="architect_contract",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
 
 class ScaffoldAgent:
@@ -518,7 +554,48 @@ class ScaffoldAgent:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._scaffold_prompt(user_request, contract_bundle)
+        return run_codex_result(
+            prompt,
+            workdir=scaffold_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="scaffold",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def create_scaffold_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        scaffold_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._scaffold_prompt(user_request, contract_bundle)
+        return await run_codex_result_async(
+            prompt,
+            workdir=scaffold_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="scaffold",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _scaffold_prompt(self, user_request: str, contract_bundle: str) -> str:
+        return dedent(
             f"""
             You are Scaffold Agent in a Codex CLI multi-agent development workflow.
             Create only the shared project skeleton for later parallel code agents.
@@ -545,19 +622,6 @@ class ScaffoldAgent:
             When finished, print a short summary of files created.
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=scaffold_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label="scaffold",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
 
 class CodeAgent:
@@ -591,7 +655,49 @@ class CodeAgent:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._implement_prompt(user_request, contract_bundle, assigned_tasks_json)
+        return run_codex_result(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=self.agent_id,
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def implement_tasks_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assigned_tasks_json: str,
+        workspace_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._implement_prompt(user_request, contract_bundle, assigned_tasks_json)
+        return await run_codex_result_async(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=self.agent_id,
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _implement_prompt(self, user_request: str, contract_bundle: str, assigned_tasks_json: str) -> str:
+        return dedent(
             f"""
             You are {self.agent_id}, a Code Agent in a parallel Codex development workflow.
             Implement only your assigned tasks. Do not ask follow-up questions.
@@ -633,19 +739,6 @@ class CodeAgent:
             4. Any integration notes for the Integrator Agent
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=workspace_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label=self.agent_id,
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
     def fix_assigned_tasks_result(
         self,
@@ -658,7 +751,59 @@ class CodeAgent:
         iteration: int,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._fix_prompt(user_request, contract_bundle, assigned_tasks_json, qa_feedback, iteration=iteration)
+        return run_codex_result(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def fix_assigned_tasks_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assigned_tasks_json: str,
+        qa_feedback: str,
+        workspace_dir: Path,
+        *,
+        iteration: int,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._fix_prompt(user_request, contract_bundle, assigned_tasks_json, qa_feedback, iteration=iteration)
+        return await run_codex_result_async(
+            prompt,
+            workdir=workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _fix_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assigned_tasks_json: str,
+        qa_feedback: str,
+        *,
+        iteration: int,
+    ) -> str:
+        return dedent(
             f"""
             Continue as {self.agent_id}, a Code Agent in a parallel Codex development workflow.
             The integrated app failed QA or the user requested fixes. Resume your own work,
@@ -702,19 +847,6 @@ class CodeAgent:
             4. Any integration notes for the Integrator Agent
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=workspace_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label=f"{self.agent_id}_fix_{iteration:02d}",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
 
 class IntegratorAgent:
@@ -747,7 +879,56 @@ class IntegratorAgent:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._integrate_prompt(user_request, contract_bundle, assignment_summary, workspace_listing)
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="integrator",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def integrate_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+        run_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._integrate_prompt(user_request, contract_bundle, assignment_summary, workspace_listing)
+        return await run_codex_result_async(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label="integrator",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _integrate_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+    ) -> str:
+        return dedent(
             f"""
             You are Integrator Agent in a parallel Codex development workflow.
             Merge the code-agent outputs into integration/merged_app.
@@ -785,19 +966,6 @@ class IntegratorAgent:
             When finished, print a concise integration report with files changed and any residual risks.
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=run_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label="integrator",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
     def repair_integration_result(
         self,
@@ -811,7 +979,75 @@ class IntegratorAgent:
         iteration: int,
         session_id: str | None = None,
     ) -> CodexResult:
-        prompt = dedent(
+        prompt = self._repair_prompt(
+            user_request,
+            contract_bundle,
+            assignment_summary,
+            workspace_listing,
+            qa_feedback,
+            iteration=iteration,
+        )
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"integrator_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+        )
+
+    async def repair_integration_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+        qa_feedback: str,
+        run_dir: Path,
+        *,
+        iteration: int,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._repair_prompt(
+            user_request,
+            contract_bundle,
+            assignment_summary,
+            workspace_listing,
+            qa_feedback,
+            iteration=iteration,
+        )
+        return await run_codex_result_async(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"integrator_fix_{iteration:02d}",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _repair_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        assignment_summary: str,
+        workspace_listing: str,
+        qa_feedback: str,
+        *,
+        iteration: int,
+    ) -> str:
+        return dedent(
             f"""
             Continue as Integrator Agent in a parallel Codex development workflow.
             The integrated app failed QA or the user requested fixes.
@@ -852,19 +1088,6 @@ class IntegratorAgent:
             When finished, print a concise repair report with files changed and residual risks.
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=run_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label=f"integrator_fix_{iteration:02d}",
-            session_id=session_id,
-            sandbox="workspace-write",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            require_writable=True,
-        )
 
 
 class QAAgent:
@@ -900,8 +1123,59 @@ class QAAgent:
         *,
         session_id: str | None = None,
     ) -> CodexResult:
+        prompt = self._review_prompt(user_request, contract_bundle, generated_app_listing, qa_report, screenshot_paths)
+        return run_codex_result(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_review",
+            session_id=session_id,
+            sandbox="read-only",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            image_paths=screenshot_paths,
+        )
+
+    async def review_result_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        qa_report: str,
+        screenshot_paths: list[Path],
+        run_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._review_prompt(user_request, contract_bundle, generated_app_listing, qa_report, screenshot_paths)
+        return await run_codex_result_async(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_review",
+            session_id=session_id,
+            sandbox="read-only",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            image_paths=screenshot_paths,
+            process_started=process_started,
+        )
+
+    def _review_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        qa_report: str,
+        screenshot_paths: list[Path],
+    ) -> str:
         screenshot_list = "\n".join(f"- {path}" for path in screenshot_paths) or "- None"
-        prompt = dedent(
+        return dedent(
             f"""
             You are {self.agent_id}, a QA Agent in a Codex CLI multi-agent development workflow.
             Review the completed app using the approved contract, generated app listing,
@@ -951,19 +1225,6 @@ class QAAgent:
             - bullet list, or "None"
             """
         ).strip()
-        return run_codex_result(
-            prompt,
-            workdir=run_dir,
-            codex_home=self.codex_home,
-            timeout=self.timeout,
-            logs_dir=self.logs_dir,
-            label=f"{self.agent_id}_review",
-            session_id=session_id,
-            sandbox="read-only",
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            image_paths=screenshot_paths,
-        )
 
 
 class DeveloperAgent:

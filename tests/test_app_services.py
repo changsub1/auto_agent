@@ -21,6 +21,7 @@ from app_services import (
     LOCAL_ENV_KEYS,
 )
 from run_worker import RunWorker
+from qa import QAResult
 from state_store import StateStore
 from workflow_engine import WorkflowEngine
 
@@ -79,6 +80,33 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(detail.state["control"]["requested_action"], "revise_plan")
         events = (self.run_dir / "events.jsonl").read_text(encoding="utf-8")
         self.assertIn("revision_requested", events)
+
+    def test_qa_approval_completes_only_after_qa_approval_checkpoint(self) -> None:
+        service = RunService(self.project_root)
+
+        with self.assertRaises(ValueError):
+            service.approve_qa("20260429_120000", OperatorActionRequest(user_id="tester"))
+
+        self.store.set_status("awaiting_qa_approval")
+        detail = service.approve_qa("20260429_120000", OperatorActionRequest(user_id="tester"))
+
+        self.assertEqual(detail.status, "completed")
+        self.assertEqual(detail.state["approval_history"][-1]["action"], "qa_approved")
+
+    def test_qa_fix_request_requires_qa_approval_checkpoint(self) -> None:
+        service = RunService(self.project_root)
+
+        with self.assertRaises(ValueError):
+            service.request_qa_fix("20260429_120000", OperatorActionRequest(user_id="tester"))
+
+        self.store.set_status("awaiting_qa_approval")
+        detail = service.request_qa_fix(
+            "20260429_120000",
+            OperatorActionRequest(user_id="tester", feedback="Tighten final UI"),
+        )
+
+        self.assertEqual(detail.status, "qa_fix_requested")
+        self.assertEqual(detail.state["approval_history"][-1]["action"], "qa_fix_requested")
 
     def test_event_service_maps_jsonl_to_timeline(self) -> None:
         events = EventService(self.project_root).list_events("20260429_120000")
@@ -229,6 +257,30 @@ class AsyncPlanningFakeWorkflowEngine(FakeWorkflowEngine):
         store.clear_active_step()
 
 
+class AsyncDevelopmentFakeWorkflowEngine(FakeWorkflowEngine):
+    def __init__(self, project_root: Path) -> None:
+        super().__init__(project_root)
+        self.development_called = False
+        self.started_processes: list[tuple[str, str]] = []
+
+    async def run_development_async(self, run_id: str, *, process_started=None) -> None:
+        self.development_called = True
+        if process_started:
+            self.started_processes.append(("contract", "architect"))
+            process_started("contract", "architect", FakeProcessHandle())
+        await asyncio.sleep(0.01)
+        run_dir = self.project_root / "runs" / run_id
+        store = StateStore(run_dir)
+        contract_dir = run_dir / "contract"
+        scaffold_dir = run_dir / "scaffold_app"
+        contract_dir.mkdir(parents=True, exist_ok=True)
+        scaffold_dir.mkdir(parents=True, exist_ok=True)
+        store.record_artifact("contract_dir", contract_dir)
+        store.record_artifact("scaffold_app", scaffold_dir)
+        store.set_status("development_scaffold_completed")
+        store.clear_active_step()
+
+
 class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -321,6 +373,33 @@ class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop()
 
+    async def test_cancel_active_job_cancels_all_registered_processes(self) -> None:
+        engine = CancelAwareFakeWorkflowEngine(self.project_root)
+        worker = RunWorker(self.project_root, engine=engine)
+        await worker.start()
+        try:
+            service = RunService(self.project_root, worker=worker)
+            detail = await service.create_run_and_enqueue(RunCreateRequest(user_request="Build an app"))
+            deadline = time.monotonic() + 3
+            while detail.run_id not in worker.active_jobs:
+                if time.monotonic() >= deadline:
+                    self.fail("worker did not start planning job")
+                await asyncio.sleep(0.02)
+
+            first_handle = FakeProcessHandle()
+            second_handle = FakeProcessHandle()
+            worker.register_process(detail.run_id, first_handle, stage="code_agents", agent_id="code_1")
+            worker.register_process(detail.run_id, second_handle, stage="code_agents", agent_id="code_2")
+
+            await service.cancel_and_enqueue(detail.run_id, OperatorActionRequest(user_id="tester"))
+            await worker.wait_idle(timeout=3)
+
+            self.assertTrue(first_handle.cancelled)
+            self.assertTrue(second_handle.cancelled)
+            self.assertNotIn(detail.run_id, worker.active_processes)
+        finally:
+            await worker.stop()
+
     async def test_planning_job_uses_async_engine_and_registers_process(self) -> None:
         engine = AsyncPlanningFakeWorkflowEngine(self.project_root)
         worker = RunWorker(self.project_root, engine=engine)
@@ -339,6 +418,27 @@ class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(detail.run_id, worker.active_processes)
             events = (Path(final.run_dir) / "events.jsonl").read_text(encoding="utf-8")
             self.assertIn("active_step_changed", events)
+        finally:
+            await worker.stop()
+
+    async def test_approval_job_uses_async_development_engine(self) -> None:
+        engine = AsyncDevelopmentFakeWorkflowEngine(self.project_root)
+        worker = RunWorker(self.project_root, engine=engine)
+        await worker.start()
+        try:
+            service = RunService(self.project_root, worker=worker)
+            detail = service.create_run(RunCreateRequest(user_request="Build an app"))
+            StateStore(Path(detail.run_dir)).set_status("awaiting_plan_approval")
+
+            await service.approve_and_enqueue(detail.run_id, OperatorActionRequest(user_id="tester"))
+            await worker.wait_idle(timeout=3)
+
+            final = service.get_run(detail.run_id)
+            self.assertTrue(engine.development_called)
+            self.assertEqual(engine.started_processes, [("contract", "architect")])
+            self.assertEqual(final.status, "development_scaffold_completed")
+            self.assertEqual(final.state["active_step"]["stage"], None)
+            self.assertNotIn(detail.run_id, worker.active_processes)
         finally:
             await worker.stop()
 
@@ -378,6 +478,166 @@ class WorkflowEngineAsyncPlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["active_step"]["stage"], None)
         self.assertEqual(seen_processes, [("planner_a", 4242)])
         self.assertTrue((self.run_dir / "planning" / "03_final_plan.md").exists())
+
+
+class WorkflowEngineAsyncDevelopmentTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project_root = Path(self.tmp.name)
+        self.run_dir = self.project_root / "runs" / "20260504_120000"
+        self.run_dir.mkdir(parents=True)
+        store = StateStore(self.run_dir)
+        store.initialize(user_request="Build an app")
+        store.write_artifact("planning/01_planner_a_draft.md", "# Draft\n", artifact_name="planner_a_draft")
+        store.write_artifact("planning/02_planner_b_review.md", "# Review\n", artifact_name="planner_b_review")
+        store.write_artifact("planning/03_final_plan.md", "# Final Plan\n", artifact_name="final_plan")
+        store.set_status("development_queued")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def test_run_development_async_runs_contract_and_scaffold(self) -> None:
+        async def fake_contract_stage(run_dir, logs_dir, store, config, plan_artifacts, **kwargs):
+            process_started = kwargs.get("process_started")
+            if process_started:
+                process_started("architect", FakeProcessHandle())
+            contract_dir = run_dir / "contract"
+            contract_dir.mkdir(parents=True, exist_ok=True)
+            (contract_dir / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
+            store.record_artifact("contract_dir", contract_dir)
+            return contract_dir
+
+        async def fake_scaffold_stage(run_dir, logs_dir, store, config, contract_dir, **kwargs):
+            process_started = kwargs.get("process_started")
+            if process_started:
+                process_started("scaffold", FakeProcessHandle())
+            scaffold_dir = run_dir / "scaffold_app"
+            scaffold_dir.mkdir(parents=True, exist_ok=True)
+            (scaffold_dir / "README.md").write_text("# Scaffold\n", encoding="utf-8")
+            store.record_artifact("scaffold_app", scaffold_dir)
+            return scaffold_dir
+
+        async def fake_code_agents_stage(run_dir, logs_dir, store, config, contract_dir, scaffold_dir, **kwargs):
+            store.set_status("code_agents_running")
+            return []
+
+        async def fake_integration_stage(run_dir, logs_dir, store, config, contract_dir, scaffold_dir, assignments, **kwargs):
+            process_started = kwargs.get("process_started")
+            if process_started:
+                process_started("integrator", FakeProcessHandle())
+            generated_app_dir = run_dir / "generated_app"
+            generated_app_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("generated_app", generated_app_dir)
+            return generated_app_dir
+
+        def fake_mechanical_qa_stage(run_dir, store, generated_app_dir, **kwargs):
+            report_path = run_dir / "qa_report.md"
+            report_path.write_text("# QA\n", encoding="utf-8")
+            return QAResult(
+                ok=True,
+                checked_files=[],
+                error_log="",
+                report_path=report_path,
+                report_markdown="# QA\n",
+                executable_status="PASS",
+                executable_app_type="manifest",
+            )
+
+        async def fake_llm_qa_stage(run_dir, logs_dir, store, config, contract_dir, generated_app_dir, mechanical_result, **kwargs):
+            return mechanical_result
+
+        seen_processes = []
+        with (
+            patch("workflow_engine.run_contract_stage_async", side_effect=fake_contract_stage),
+            patch("workflow_engine.run_scaffold_stage_async", side_effect=fake_scaffold_stage),
+            patch("workflow_engine.run_code_agents_stage_async", side_effect=fake_code_agents_stage),
+            patch("workflow_engine.run_integration_stage_async", side_effect=fake_integration_stage),
+            patch("workflow_engine.run_mechanical_qa_stage", side_effect=fake_mechanical_qa_stage),
+            patch("workflow_engine.run_llm_qa_stage_async", side_effect=fake_llm_qa_stage),
+        ):
+            await WorkflowEngine(self.project_root).run_development_async(
+                "20260504_120000",
+                process_started=lambda stage, agent_id, handle: seen_processes.append((stage, agent_id, handle.pid)),
+            )
+
+        state = StateStore(self.run_dir).load()
+        self.assertEqual(state["status"], "awaiting_qa_approval")
+        self.assertEqual(state["active_step"]["stage"], None)
+        self.assertEqual(
+            seen_processes,
+            [("contract", "architect", 4242), ("scaffold", "scaffold", 4242), ("integration", "integrator", 4242)],
+        )
+        self.assertEqual(state["artifacts"]["contract_dir"], "contract")
+        self.assertEqual(state["artifacts"]["scaffold_app"], "scaffold_app")
+        self.assertEqual(state["artifacts"]["generated_app"], "generated_app")
+
+    async def test_run_development_async_runs_fix_loop_after_qa_failure(self) -> None:
+        async def fake_contract_stage(run_dir, logs_dir, store, config, plan_artifacts, **kwargs):
+            contract_dir = run_dir / "contract"
+            contract_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("contract_dir", contract_dir)
+            return contract_dir
+
+        async def fake_scaffold_stage(run_dir, logs_dir, store, config, contract_dir, **kwargs):
+            scaffold_dir = run_dir / "scaffold_app"
+            scaffold_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("scaffold_app", scaffold_dir)
+            return scaffold_dir
+
+        async def fake_code_agents_stage(run_dir, logs_dir, store, config, contract_dir, scaffold_dir, **kwargs):
+            return []
+
+        async def fake_integration_stage(run_dir, logs_dir, store, config, contract_dir, scaffold_dir, assignments, **kwargs):
+            generated_app_dir = run_dir / "generated_app"
+            generated_app_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("generated_app", generated_app_dir)
+            return generated_app_dir
+
+        qa_calls = []
+
+        def fake_mechanical_qa_stage(run_dir, store, generated_app_dir, **kwargs):
+            qa_calls.append(kwargs.get("attempt_index"))
+            ok = len(qa_calls) > 1
+            report_path = run_dir / "qa_report.md"
+            report_path.write_text("# QA\n", encoding="utf-8")
+            return QAResult(
+                ok=ok,
+                checked_files=[],
+                error_log="" if ok else "broken app",
+                report_path=report_path,
+                report_markdown="# QA\n",
+                executable_status="PASS" if ok else "FAIL",
+                executable_app_type="manifest",
+                affected_paths=[] if ok else ["src/app.py"],
+                suspected_owners=[],
+            )
+
+        async def fake_llm_qa_stage(run_dir, logs_dir, store, config, contract_dir, generated_app_dir, mechanical_result, **kwargs):
+            return mechanical_result
+
+        fix_calls = []
+
+        async def fake_targeted_fix_stage(run_dir, logs_dir, store, config, contract_dir, scaffold_dir, assignments, qa_result, **kwargs):
+            fix_calls.append(kwargs.get("iteration"))
+            generated_app_dir = run_dir / "generated_app"
+            generated_app_dir.mkdir(parents=True, exist_ok=True)
+            return generated_app_dir
+
+        with (
+            patch("workflow_engine.run_contract_stage_async", side_effect=fake_contract_stage),
+            patch("workflow_engine.run_scaffold_stage_async", side_effect=fake_scaffold_stage),
+            patch("workflow_engine.run_code_agents_stage_async", side_effect=fake_code_agents_stage),
+            patch("workflow_engine.run_integration_stage_async", side_effect=fake_integration_stage),
+            patch("workflow_engine.run_mechanical_qa_stage", side_effect=fake_mechanical_qa_stage),
+            patch("workflow_engine.run_llm_qa_stage_async", side_effect=fake_llm_qa_stage),
+            patch("workflow_engine.run_targeted_fix_stage_async", side_effect=fake_targeted_fix_stage),
+        ):
+            await WorkflowEngine(self.project_root).run_development_async("20260504_120000")
+
+        state = StateStore(self.run_dir).load()
+        self.assertEqual(state["status"], "awaiting_qa_approval")
+        self.assertEqual(qa_calls, [0, 1])
+        self.assertEqual(fix_calls, [1])
 
 
 if __name__ == "__main__":

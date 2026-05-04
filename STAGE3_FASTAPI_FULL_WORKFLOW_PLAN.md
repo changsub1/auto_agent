@@ -32,6 +32,27 @@ Stage 3 starts from that checkpoint.
 
 ## Stage 3A: Full Workflow Engine Migration
 
+Status: complete in this branch.
+
+- `continue_after_plan_approval` now starts `WorkflowEngine.run_development_async`
+  when available.
+- FastAPI/RunWorker development execution now runs contract and scaffold.
+- Architect and Scaffold agents have async Codex runner paths.
+- Contract/scaffold subprocesses are registered for active process cancel.
+- Code agents, integration, and mechanical QA now run through the
+  FastAPI/RunWorker path.
+- Multiple active Codex subprocesses can be registered per run, so parallel code
+  agent cancellation can stop every active child process.
+- LLM QA now runs through the FastAPI/RunWorker path when `qa_agent_count` is
+  greater than zero.
+- Targeted fix loop now runs through the FastAPI/RunWorker path for code-agent
+  fixes and integrator repair.
+- The workflow now reaches `awaiting_qa_approval` after mechanical QA.
+- Final completion after QA approval remains handled by the existing
+  `approve_qa` service action.
+- QA approve and QA fix requests are accepted only from
+  `awaiting_qa_approval`.
+
 Goal: move planning-after-approval execution into `WorkflowEngine` and
 `RunWorker`.
 
@@ -47,7 +68,9 @@ Stages to migrate:
 
 Implementation tasks:
 
-1. Add workflow methods after planning approval:
+1. Add workflow methods after planning approval. Done:
+   `run_development_async(...)` exists for contract, scaffold, code agents,
+   integration, mechanical QA, LLM QA, and targeted fix loop.
    - `run_development_async(...)`
    - narrower internal methods such as `_run_contract_async`,
      `_run_scaffold_async`, `_run_code_agents_async`, `_run_integration_async`,
@@ -62,8 +85,54 @@ Implementation tasks:
    - interruptible
 5. Keep artifact paths and event names compatible with current UI readers.
 6. Ensure `continue_after_plan_approval` starts development instead of only
-   marking `development_queued`.
+   marking `development_queued`. Done for Stage 3A-1.
 7. Preserve the existing manifest-first executable QA behavior.
+
+Completed Stage 3A-2 scope:
+
+- migrate code agents,
+- migrate integration,
+- migrate mechanical QA.
+
+Completed additional Stage 3A scope:
+
+- migrate LLM QA,
+- migrate targeted fix loop,
+- define final completion status after QA approval.
+
+Stage 3A-1 verified with:
+
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m unittest discover -s tests`
+- `npm run build`
+- `git diff --check`
+
+Stage 3A-2 verified with:
+
+- `python -m py_compile agents.py local_dashboard_runner.py workflow_engine.py run_worker.py tests\test_app_services.py`
+- `python -m unittest discover -s tests -p test_app_services.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m unittest discover -s tests`
+- `npm run build`
+- `git diff --check`
+
+LLM QA and fix loop verified with:
+
+- `python -m py_compile agents.py local_dashboard_runner.py workflow_engine.py run_worker.py tests\test_app_services.py`
+- `python -m unittest discover -s tests -p test_app_services.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m unittest discover -s tests`
+- `npm run build`
+- `git diff --check`
+
+Final QA approval policy verified with:
+
+- `python -m py_compile app_services.py tests\test_app_services.py`
+- `python -m unittest discover -s tests -p test_app_services.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m unittest discover -s tests`
+- `npm run build`
+- `git diff --check`
 
 Acceptance:
 
@@ -74,6 +143,10 @@ Acceptance:
 - Cancel works during contract, scaffold, code, integration, and LLM QA Codex
   calls.
 - Mechanical QA results remain attached to the run.
+- LLM QA results are attached when QA agents are enabled.
+- QA fix loop runs up to `max_fix_iterations` before the run waits for
+  operator QA approval.
+- Operator QA approval moves `awaiting_qa_approval` to `completed`.
 
 ## Stage 3B: Discord As API Client
 

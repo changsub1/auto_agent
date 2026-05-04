@@ -41,7 +41,7 @@ class RunWorker:
         self._stopping = False
         self._queued: dict[str, RunJob] = {}
         self.active_jobs: dict[str, RunJob] = {}
-        self.active_processes: dict[str, Any] = {}
+        self.active_processes: dict[str, dict[str, Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def start(self) -> None:
@@ -95,7 +95,8 @@ class RunWorker:
     ) -> None:
         """Register a running child process so operator cancel can stop it."""
 
-        self.active_processes[run_id] = handle
+        handle_key = _process_handle_key(stage=stage, agent_id=agent_id, handle=handle)
+        self.active_processes.setdefault(run_id, {})[handle_key] = handle
         run_dir = self.runs_root / run_id
         if not run_dir.exists():
             return
@@ -111,10 +112,11 @@ class RunWorker:
         )
 
     async def cancel_active_process(self, run_id: str, *, job: RunJob | None = None) -> bool:
-        handle = self.active_processes.get(run_id)
-        if handle is None:
+        handles = dict(self.active_processes.get(run_id) or {})
+        if not handles:
             return False
         run_dir = self.runs_root / run_id
+        pids = [getattr(handle, "pid", None) for handle in handles.values()]
         if run_dir.exists():
             event_job = job or self.active_jobs.get(run_id) or RunJob(run_id=run_id, kind="cancel")
             self._append_worker_event(
@@ -122,10 +124,10 @@ class RunWorker:
                 "active_process_cancel_started",
                 "Active child process cancellation started",
                 event_job,
-                {"pid": getattr(handle, "pid", None)},
+                {"pids": pids},
             )
         try:
-            await handle.cancel()
+            await asyncio.gather(*(handle.cancel() for handle in handles.values()))
         finally:
             self.active_processes.pop(run_id, None)
         if run_dir.exists():
@@ -135,7 +137,7 @@ class RunWorker:
                 "active_process_cancelled",
                 "Active child process cancelled",
                 event_job,
-                {"pid": getattr(handle, "pid", None)},
+                {"pids": pids},
             )
             StateStore(run_dir).clear_active_step()
         return True
@@ -184,7 +186,7 @@ class RunWorker:
             await self._run_planning_job(job)
             return
         if job.kind == "continue_after_plan_approval":
-            await asyncio.to_thread(self.engine.mark_development_queued, job.run_id)
+            await self._run_development_job(job)
             return
         if job.kind == "cancel":
             await self.cancel_active_process(job.run_id, job=job)
@@ -210,6 +212,22 @@ class RunWorker:
                 job.run_id,
                 handle,
                 stage="planning",
+                agent_id=agent_id,
+            ),
+        )
+
+    async def _run_development_job(self, job: RunJob) -> None:
+        run_development_async = getattr(self.engine, "run_development_async", None)
+        if run_development_async is None:
+            await asyncio.to_thread(self.engine.mark_development_queued, job.run_id)
+            return
+
+        await run_development_async(
+            job.run_id,
+            process_started=lambda stage, agent_id, handle: self.register_process(
+                job.run_id,
+                handle,
+                stage=stage,
                 agent_id=agent_id,
             ),
         )
@@ -264,3 +282,14 @@ def _run_was_cancelled(state: dict[str, Any]) -> bool:
     control = state.get("control")
     requested_action = control.get("requested_action") if isinstance(control, dict) else None
     return state.get("status") == "cancelled" or requested_action == "cancel"
+
+
+def _process_handle_key(*, stage: str | None, agent_id: str | None, handle: Any) -> str:
+    pid = getattr(handle, "pid", None)
+    return ":".join(
+        [
+            str(stage or "codex"),
+            str(agent_id or "agent"),
+            str(pid or id(handle)),
+        ]
+    )
