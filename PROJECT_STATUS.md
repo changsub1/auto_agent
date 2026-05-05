@@ -14,6 +14,17 @@ As of 2026-04-29, the product direction is a local Tauri desktop app with a
 localhost-only FastAPI sidecar. Discord should become a lightweight remote
 control and notification adapter, not the owner of the main workflow.
 
+As of Stage 3 closeout, the architecture migration is considered MVP-complete.
+The next work should finish the app surface, package it as a local desktop app,
+and dogfood it on real personal development requests before final cleanup.
+The detailed plan is in `STAGE4_APP_COMPLETION_PACKAGING_PLAN.md`.
+
+As of version 8, Stage 4A and Stage 4B are usable for dogfooding: the Tauri
+desktop app starts the local FastAPI sidecar, runs through plan approval,
+implementation, mechanical QA, and QA approval, and shows a cleaner
+agent-output-focused run timeline. Windows installer packaging remains the main
+Stage 4C gap.
+
 ## Phase 1: Implemented
 
 ### Local Codex CLI Integration
@@ -43,21 +54,25 @@ codex exec --skip-git-repo-check --sandbox workspace-write --color never -
 - Discord bot entrypoint: `discord_bot.py`
 - Slash command: `/dev`
 - User can request a service/app from Discord.
-- Bot posts progress updates to the Discord channel.
-- Planner Agent A creates an initial plan.
-- Planner Agent B reviews the plan.
-- Planner Agent A creates a final plan.
-- Architect Agent creates a contract bundle and task manifest.
+- Bot posts progress updates to the Discord channel while controlling runs
+  through the localhost FastAPI API.
+- FastAPI worker runs Planner Agent A, optional Planner Agent B, and Planner
+  Agent A finalization.
+- The parallel route creates a contract bundle and task manifest after plan
+  approval as part of the worker-owned implementation flow.
 - Discord buttons allow the requester to:
   - Approve
   - Request changes
   - Cancel
-- If approved, Scaffold Agent creates `scaffold_app`.
-- Code Agents implement assigned task groups in isolated workspaces in parallel.
-- Integrator Agent merges the work into `generated_app`.
-- QA result, generated app path, and executable QA screenshots are posted back
-  to Discord when the probe can run.
-- After QA, Discord asks the requester to approve the result or request fixes.
+- If approved, Discord calls the API and the FastAPI worker continues the
+  selected route.
+- QA result, generated app path, and executable QA screenshots are read through
+  the API/artifact state and posted back to Discord when available.
+- After QA, Discord asks the requester to approve the result or record a fix
+  request.
+- Discord exposes read-only `/runs` and `/status` commands backed by the local
+  API. Status output includes active-step metadata and a short log tail from
+  Stage 3C observation endpoints.
 - A first routing core is implemented through `ROUTING_MODE` with `fast`,
   `balanced`, `parallel`, and `manual` modes. The default is `balanced`. Fast
   and balanced routes now use `CodeAgent(code_1)` directly instead of the
@@ -86,6 +101,8 @@ codex exec resume <session_id> -
 
 - `main.py`: local CLI orchestrator
 - `app_services.py`: UI-agnostic local service layer for run/config/event/artifact/action access
+- `discord_api_client.py`: small localhost FastAPI client used by Discord
+- `discord_api_engine.py`: Discord presentation adapter over the local API
 - `local_api.py`: FastAPI adapter over the local service layer
 - `run_local_api.py`: localhost-only API server runner
 - `discord_bot.py`: Discord slash command entrypoint
@@ -125,6 +142,13 @@ Completed so far:
 - Added React/Vite entry files and replaced the prototype UX mock wiring with
   API calls for config, runs, events, artifacts, and approval actions.
 - Added a Tauri scaffold under `ux/src-tauri/` for the future desktop shell.
+- Hardened the Tauri shell into a usable local app wrapper:
+  - prefers the repo-local `.venv` Python for `run_local_api.py`,
+  - supports `ORCHESTRA_PYTHON` and `ORCHESTRA_REPO_ROOT` overrides,
+  - chooses a localhost API port and waits for `/health`,
+  - injects the API base URL into React,
+  - captures sidecar stdout/stderr under `tmp/tauri_sidecar/`,
+  - stops the sidecar on app close.
 - Added local provider/account display:
   - `CODEX_HOME`
   - `PLANNER_*_CODEX_HOME`
@@ -144,33 +168,45 @@ Completed so far:
 - Manual mode now supports local UI add/toggle/delete for agents and passes
   active Planner/Code/QA counts into `POST /runs`.
 - Fixed the app root height bug that caused a white gap when the viewport grew.
+- The React run monitor now defaults to a clean operator timeline that focuses
+  on agent outputs, approvals, user actions, and errors. Internal worker/system
+  events remain available through `System` and `All` filters.
+- Agent output events now preview the generated markdown artifact content
+  directly in the timeline.
 - The latest checked validation passed:
-  - `python -m py_compile app_services.py local_dashboard_runner.py local_api.py run_local_api.py run_worker.py workflow_engine.py state_store.py`
-  - `python -m unittest discover -s tests`
+  - `python -m py_compile app_services.py state_store.py tests\test_app_services.py`
+  - `python -m unittest discover -s tests` (38 tests)
   - `npm run build` from `ux/`
+  - `cargo check` from `ux/src-tauri/`
 
 Still partial:
 
-- `POST /runs` is connected to the existing local dashboard runner, so it is
-  useful for planning/contract/scaffold-stage testing but is not yet the final
-  long-running workflow engine.
-- Approve, request changes, QA approve, QA fix, and cancel are persisted through
-  the API, but approve/fix actions do not yet advance the full implementation
-  pipeline from the app.
+- `POST /runs` now creates run state quickly and enqueues planning through the
+  FastAPI run worker. Plan approval now advances through the implementation and
+  QA workflow from the app.
+- Fast and balanced routes now run a single `CodeAgent(code_1)` against
+  `generated_app`; parallel and manual multi-code routes run contract,
+  scaffold, parallel Code Agents, integration, mechanical QA, optional LLM QA,
+  and the automatic fix loop.
+- QA approve is connected and moves `awaiting_qa_approval` to `completed`.
+  Operator-requested QA fixes after that checkpoint are still recorded but not
+  yet re-enqueued as a separate worker continuation.
 - Manual mode agent cards currently affect supported role counts. They are not
   yet a full agent registry with per-agent prompts, models, accounts, and
   execution ownership.
-- Tauri scaffolding exists, but Windows `.exe` packaging is not verified because
-  Rust/Cargo and the Python sidecar packaging path still need to be installed
-  and finalized.
+- Tauri dev-mode app execution is verified, including sidecar startup. Windows
+  installer packaging is not yet smoke-tested.
+- The Python sidecar packaging strategy is still undecided for distributable
+  builds: source + existing Python/`.venv` for local development, or a bundled
+  sidecar executable for installer builds.
 
-FastAPI run worker Stage 1 is complete for the first worker slice:
+FastAPI run worker migration status:
 
 - Added `run_worker.py` with an in-process `asyncio.Queue`, `RunJob`, active
   job registry, per-run locks, and job dispatch for planning, plan approval,
   plan revision, and cancellation.
 - Added `workflow_engine.py` as the non-Discord workflow stage owner for local
-  planning execution and development-queued checkpoints.
+  planning, route-aware implementation, QA, and automatic fix checkpoints.
 - Extended `state_store.py` with `active_step`, `control`, and `workflow`
   helpers while keeping older run state readable.
 - Changed local API run creation so `POST /runs` creates run state quickly,
@@ -179,16 +215,39 @@ FastAPI run worker Stage 1 is complete for the first worker slice:
 - Changed approve/request-changes/cancel service methods so they validate state,
   persist approval/control events, and enqueue the next worker job when the
   FastAPI worker is available.
+- Added an async full-workflow path for plan approval. Route behavior is now:
+  `fast` and `balanced` use a single Code Agent; `parallel` and manual routes
+  with more than one Code Agent use contract/scaffold/code/integration.
+- Shared local workflow helpers now pass stored Codex session ids into follow-up
+  calls and fall back to a fresh call if resume fails with a Codex execution
+  error.
+- Added Stage 3C observation APIs:
+  - `GET /runs/{run_id}/active-step`
+  - `GET /runs/{run_id}/logs`
+  - `GET /runs/{run_id}/logs/tail`
+  - enriched artifact metadata with type, stage, role, existence, size, and
+    updated time
+- The React run monitor now shows active step metadata and recent log tails from
+  the API instead of reading local files directly.
 - Added worker-focused tests using a fake workflow engine.
 - Verified on 2026-04-30 with Python compile checks, the unittest suite, and
   the React/Vite production build.
 
+Stage 3 closeout:
+
+- Stage 3 is complete for the local API workflow and Discord adapter MVP.
+- Remaining Stage 3 hardening items should be carried as product backlog, not
+  blockers for starting Stage 4.
+- The project should now be used through the app on real development requests
+  to discover practical UX, QA, recovery, and packaging issues.
+
 ## Known Limitations
 
-- The new local API now creates run state quickly and enqueues planning through
-  the FastAPI run worker. Contract/scaffold/full code/integration/QA execution
-  is still not fully owned by the worker; those deeper orchestration methods
-  still need to be decoupled from Discord channel/interaction objects.
+- The local API now creates run state quickly, enqueues planning, and continues
+  implementation/QA through the FastAPI run worker after plan approval.
+  `discord_bot.py` now uses the API adapter instead of directly running the
+  long workflow. The older `debate_engine.py` remains in the repository as a
+  legacy implementation/reference path.
 - Tauri scaffolding is present, but local packaging requires Rust/Cargo,
   Node dependencies, and FastAPI dependencies to be installed on the machine.
 - The Discord approval path no longer always uses the full contract/scaffold/
@@ -211,7 +270,9 @@ FastAPI run worker Stage 1 is complete for the first worker slice:
 - Codex-backed QA Agent review is implemented after mechanical QA. It can use
   the configured QA `CODEX_HOME`, model, reasoning effort, QA report, contract,
   generated app listing, and attached screenshots.
-- Session resume is supported, but deeper long-term memory compaction is not implemented.
+- Session resume is supported in the shared local workflow path, with fallback
+  to a fresh call on Codex execution failure. Deeper long-term memory compaction
+  is not implemented.
 - Discord approval controls are requester-only, not role/team-policy based.
 - `reference_packs/gstack_src/` and `reference_packs/karpathy_src/` are local
   ignored vendor caches. The orchestrator only attaches curated committed
@@ -223,40 +284,30 @@ FastAPI run worker Stage 1 is complete for the first worker slice:
 
 Complete the product in this order:
 
-1. Build the Stage 2 streaming and interruptible Codex runner.
-   - Add an async Codex process runner that streams stdout/stderr to log files.
-   - Track PID/process handles in `active_step` so cancel can stop active Codex
-     subprocesses.
-   - Emit heartbeat/progress events while long-running Codex calls execute.
-   - Support soft interrupt by storing feedback for the next safe checkpoint.
-   - Support hard interrupt by terminating the active process tree and marking
-     the run interrupted or cancelled.
-2. Decouple full code, revision, and QA flows from Discord.
-   - Move Discord-owned orchestration code into shared service methods.
-   - Keep Discord as an adapter that calls the same service layer used by the
-   app and future CLI.
-   - Preserve Discord buttons and text summaries, but make the app capable of
-   the same approve/request-change/cancel/QA-fix actions.
-3. Finish the remaining worker migration.
-   - Persist state transitions for contract, scaffold, code, integration, QA,
-     fix, and completion.
-   - Add worker jobs for starting/continuing after approval and running fixes
-     after change requests.
-   - Reuse the Stage 2 process runner for all Codex-backed stages.
-4. Strengthen generic executable QA.
+1. Finish the desktop app surface and use it for real runs.
+   - Make the React/Tauri UI the primary control surface.
+   - Verify full run creation, plan approval, execution observation, QA review,
+     and completion from the app.
+   - Record dogfooding findings before doing broad cleanup.
+2. Package the local desktop app.
+   - Harden the Tauri sidecar lifecycle.
+   - Decide how the Python FastAPI sidecar is bundled.
+   - Build and smoke-test a Windows installer.
+3. Harden cancel, retry, and recovery based on real failures.
+   - Ensure cancelled runs are not overwritten by late worker exceptions.
+   - Add explicit retry entry points for failed or cancelled stages where
+     practical.
+   - Re-enqueue operator-requested QA fixes after `awaiting_qa_approval`.
+4. Strengthen generic executable QA where dogfooding shows gaps.
    - Expand the initial manifest runner with richer schema coverage and
      environment handling.
    - Use framework adapters for Python, Node/Vite/React, static HTML, and CLI
      projects when the manifest is missing.
    - Add Playwright browser checks for web apps: page load, blank screen,
      console errors, screenshot capture, and basic interaction probes.
-5. Finish the desktop app packaging path.
-   - Install Rust/Cargo for Tauri builds.
-   - Decide whether the Python API sidecar runs from source in dev and from a
-     PyInstaller-built executable in production.
-   - Make Tauri choose a free local port, inject it into the UI, and stop the
-     sidecar on app exit.
-   - Verify Windows `.exe` packaging after the backend worker is stable.
+5. Clean up legacy paths after the packaged app proves the main workflow.
+   - Decide whether to remove or quarantine `debate_engine.py`.
+   - Keep `main.py` legacy CLI only if it remains useful for diagnostics.
 6. Polish app UX on top of the stable backend.
    - Run graph and stage controls.
    - Full artifact preview/editor.

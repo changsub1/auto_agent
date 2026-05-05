@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from config import DiscordBotConfig, load_discord_bot_config
-from debate_engine import DebateEngine
+from discord_api_client import LocalApiClient, LocalApiError
+from discord_api_engine import DiscordApiEngine
 from discord_reporter import DiscordReporter
 
 
@@ -18,14 +17,13 @@ class CodexDevBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.config_data = config
-        self.engine = DebateEngine(
-            project_root=Path(__file__).resolve().parent,
+        self.engine = DiscordApiEngine(
+            api_client=LocalApiClient(config.local_api_base_url),
             reporter=DiscordReporter(),
             planner_a_codex_home=config.planner_a_codex_home,
             planner_b_codex_home=config.planner_b_codex_home,
             architect_codex_home=config.architect_codex_home,
             scaffold_codex_home=config.scaffold_codex_home,
-            developer_codex_home=config.developer_codex_home,
             integrator_codex_home=config.integrator_codex_home,
             code_agent_codex_homes=config.code_agent_codex_homes,
             code_agent_count=config.code_agent_count,
@@ -35,12 +33,7 @@ class CodexDevBot(commands.Bot):
             codex_reasoning_effort=config.codex_reasoning_effort,
             max_fix_iterations=config.max_fix_iterations,
             codex_timeout_seconds=config.codex_timeout_seconds,
-            executable_qa_enabled=config.executable_qa_enabled,
-            executable_qa_timeout_seconds=config.executable_qa_timeout_seconds,
-            executable_qa_allow_local_commands=config.executable_qa_allow_local_commands,
             routing_mode=config.routing_mode,
-            reference_pack_enabled=config.reference_pack_enabled,
-            agent_references=config.agent_reference_profiles,
         )
 
     async def setup_hook(self) -> None:
@@ -68,14 +61,41 @@ def build_bot(config: DiscordBotConfig) -> CodexDevBot:
             await interaction.followup.send("Cannot start because this interaction has no channel.", ephemeral=True)
             return
 
-        run_id, run_dir = await bot.engine.start_discord_request(
-            request=request,
-            channel=channel,
-            requester_id=interaction.user.id,
-            guild_id=interaction.guild_id,
-            request_interaction_id=interaction.id,
-        )
-        await interaction.followup.send(f"Run `{run_id}` started. Local path: `{run_dir}`", ephemeral=True)
+        try:
+            run_id, run_dir = await bot.engine.start_discord_request(
+                request=request,
+                channel=channel,
+                requester_id=interaction.user.id,
+                guild_id=interaction.guild_id,
+                request_interaction_id=interaction.id,
+            )
+            await interaction.followup.send(f"Run `{run_id}` started. Local path: `{run_dir}`", ephemeral=True)
+        except LocalApiError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+
+    @bot.tree.command(name="status", description="Show one local API run status.")
+    @app_commands.describe(run_id="Run id from the local API.")
+    async def status(interaction: discord.Interaction, run_id: str) -> None:
+        if not _is_allowed(config, interaction):
+            await interaction.response.send_message("You are not allowed to inspect runs here.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            await interaction.followup.send(await bot.engine.build_status_message(run_id), ephemeral=True)
+        except LocalApiError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+
+    @bot.tree.command(name="runs", description="List recent local API runs.")
+    @app_commands.describe(limit="Maximum runs to show, from 1 to 20.")
+    async def runs(interaction: discord.Interaction, limit: int = 10) -> None:
+        if not _is_allowed(config, interaction):
+            await interaction.response.send_message("You are not allowed to inspect runs here.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            await interaction.followup.send(await bot.engine.build_runs_message(limit=limit), ephemeral=True)
+        except LocalApiError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
 
     return bot
 

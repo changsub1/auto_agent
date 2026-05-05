@@ -17,6 +17,8 @@ from local_dashboard_runner import (
     run_planning_stage,
     run_planning_stage_async,
     run_scaffold_stage_async,
+    run_single_code_fix_stage_async,
+    run_single_code_stage_async,
     run_targeted_fix_stage_async,
 )
 from routing import RoutingDecision
@@ -115,9 +117,11 @@ class WorkflowEngine:
             store.append_event("worker_skipped", "system", "Development skipped because run is cancelled")
             return
 
-        config = local_config_from_state(store.load())
+        state = store.load()
+        config = local_config_from_state(state)
         logs_dir = create_logs_dir(run_dir)
-        plan_artifacts = _load_plan_artifacts(run_dir, store.load())
+        plan_artifacts = _load_plan_artifacts(run_dir, state)
+        route = _route_from_state(state)
 
         def register_process(stage: str, agent_id: str, handle: CodexProcessHandle) -> None:
             store.set_active_step(
@@ -129,8 +133,20 @@ class WorkflowEngine:
             if process_started is not None:
                 process_started(stage, agent_id, handle)
 
-        store.set_active_step(stage="contract", agent_id="architect", interruptible=True)
         try:
+            if not route.uses_integrator:
+                await self._run_single_code_development_async(
+                    run_dir=run_dir,
+                    store=store,
+                    config=config,
+                    logs_dir=logs_dir,
+                    final_plan=plan_artifacts["final_plan"],
+                    route=route,
+                    register_process=register_process,
+                )
+                return
+
+            store.set_active_step(stage="contract", agent_id="architect", interruptible=True)
             contract_dir = await run_contract_stage_async(
                 run_dir,
                 logs_dir,
@@ -282,6 +298,127 @@ class WorkflowEngine:
         finally:
             store.clear_active_step()
 
+    async def _run_single_code_development_async(
+        self,
+        *,
+        run_dir: Path,
+        store: StateStore,
+        config: LocalRunConfig,
+        logs_dir: Path,
+        final_plan: str,
+        route: RoutingDecision,
+        register_process: Callable[[str, str, CodexProcessHandle], None],
+    ) -> None:
+        generated_app_dir, assignment, _code_result = await run_single_code_stage_async(
+            run_dir,
+            logs_dir,
+            store,
+            config,
+            final_plan,
+            route,
+            running_status="code_agent_running",
+            process_started=lambda agent_id, handle: register_process("code_agent", agent_id, handle),
+        )
+        if _control_action(store.load()) == "cancel":
+            store.set_status("cancelled")
+            return
+
+        fix_iterations_used = 0
+        store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+        qa_result = await asyncio.to_thread(
+            run_mechanical_qa_stage,
+            run_dir,
+            store,
+            generated_app_dir,
+            attempt_name="single-agent mechanical QA",
+            attempt_index=0,
+        )
+        if route.uses_llm_qa:
+            qa_result = await run_llm_qa_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                run_dir / "contract",
+                generated_app_dir,
+                qa_result,
+                attempt_index=0,
+                process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+            )
+        if _control_action(store.load()) == "cancel":
+            store.set_status("cancelled")
+            return
+
+        while not qa_result.ok and fix_iterations_used < config.max_fix_iterations:
+            fix_iterations_used += 1
+            store.append_event(
+                "qa_failed",
+                "qa",
+                "QA failed",
+                {
+                    "iteration": fix_iterations_used,
+                    "executable_status": qa_result.executable_status,
+                    "suspected_owners": qa_result.suspected_owners,
+                    "affected_paths": qa_result.affected_paths,
+                },
+            )
+            await run_single_code_fix_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                final_plan,
+                route,
+                assignment,
+                qa_result,
+                iteration=fix_iterations_used,
+                process_started=lambda agent_id, handle: register_process("fix", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+            qa_result = await asyncio.to_thread(
+                run_mechanical_qa_stage,
+                run_dir,
+                store,
+                generated_app_dir,
+                attempt_name=f"single-agent mechanical QA after fix {fix_iterations_used}",
+                attempt_index=fix_iterations_used,
+            )
+            if route.uses_llm_qa:
+                qa_result = await run_llm_qa_stage_async(
+                    run_dir,
+                    logs_dir,
+                    store,
+                    config,
+                    run_dir / "contract",
+                    generated_app_dir,
+                    qa_result,
+                    attempt_index=fix_iterations_used,
+                    process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+                )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+        store.clear_control_action()
+        store.set_status("awaiting_qa_approval")
+        store.append_event(
+            "worker_checkpoint",
+            "system",
+            "Single-code development and mechanical QA completed",
+            {
+                "stage": "mechanical_qa",
+                "route": route.mode,
+                "qa_status": "PASS" if qa_result.ok else "FAIL",
+                "executable_status": qa_result.executable_status,
+                "executable_app_type": qa_result.executable_app_type,
+                "fix_iterations_used": fix_iterations_used,
+            },
+        )
+
     def mark_development_queued(self, run_id: str) -> None:
         run_dir = self._run_dir(run_id)
         store = StateStore(run_dir)
@@ -321,12 +458,19 @@ class WorkflowEngine:
 def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
     dashboard_config = state.get("dashboard_config") if isinstance(state.get("dashboard_config"), dict) else {}
     homes = dashboard_config.get("codex_homes") if isinstance(dashboard_config.get("codex_homes"), dict) else {}
+    routing = state.get("routing") if isinstance(state.get("routing"), dict) else {}
+    planner_count = _int_value(routing.get("planner_count"), _int_value(dashboard_config.get("planner_count"), 2))
+    code_agent_count = _int_value(
+        routing.get("code_agent_count"),
+        _int_value(dashboard_config.get("code_agent_count"), 1),
+    )
+    qa_agent_count = _int_value(routing.get("qa_agent_count"), _int_value(dashboard_config.get("qa_agent_count"), 0))
     return LocalRunConfig(
         user_request=str(state.get("user_request") or dashboard_config.get("user_request") or ""),
         run_mode=str(dashboard_config.get("run_mode") or "planning_only"),
-        planner_count=_int_value(dashboard_config.get("planner_count"), 2),
-        code_agent_count=_int_value(dashboard_config.get("code_agent_count"), 1),
-        qa_agent_count=_int_value(dashboard_config.get("qa_agent_count"), 0),
+        planner_count=planner_count,
+        code_agent_count=code_agent_count,
+        qa_agent_count=qa_agent_count,
         planner_a_codex_home=_optional_str(homes.get("planner_a")),
         planner_b_codex_home=_optional_str(homes.get("planner_b")),
         planner_c_codex_home=_optional_str(homes.get("planner_c")),
@@ -340,6 +484,14 @@ def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
         max_fix_iterations=_int_value(dashboard_config.get("max_fix_iterations"), 1),
         timeout_seconds=_int_value(dashboard_config.get("timeout_seconds"), 900),
     )
+
+
+def _route_from_state(state: dict[str, Any]) -> RoutingDecision:
+    payload = state.get("routing")
+    if isinstance(payload, dict):
+        return RoutingDecision.from_dict(payload)
+    mode = str((state.get("dashboard_config") or {}).get("routing_mode") or "balanced")
+    return RoutingDecision.from_dict({"requested_mode": mode, "mode": "balanced"})
 
 
 def workflow_from_route(route: RoutingDecision) -> dict[str, Any]:
@@ -356,7 +508,6 @@ def workflow_from_route(route: RoutingDecision) -> dict[str, Any]:
         stages.extend(
             [
                 {"id": "contract", "type": "contract", "agents": ["architect"], "parallel": False},
-                {"id": "approval_contract", "type": "approval", "after": ["contract"]},
             ]
         )
     stages.append(

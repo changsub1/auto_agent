@@ -13,7 +13,7 @@ import asyncio
 import re
 
 from agents import ArchitectAgent, CodeAgent, IntegratorAgent, PlannerAgentA, PlannerAgentB, QAAgent, ScaffoldAgent
-from codex_runner import CodexProcessHandle, CodexResult, run_codex_result, run_codex_result_async
+from codex_runner import CodexExecutionError, CodexProcessHandle, CodexResult, run_codex_result, run_codex_result_async
 from executable_qa import run_executable_qa
 from parallel_workflow import (
     CodeAgentAssignment,
@@ -35,6 +35,7 @@ from parallel_workflow import (
 from qa import QAResult, combine_mechanical_qa_results, run_python_syntax_check
 from state_store import StateStore
 from workspace_manager import create_logs_dir, create_run_dir, normalize_windows_command_files, save_text
+from workspace_manager import create_generated_app_dir
 
 
 RUN_MODES = ("planning_only", "contract_only", "scaffold_only", "full_run")
@@ -145,7 +146,10 @@ def run_planning_stage(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    draft_result = planner_a.create_initial_plan(planning_request, run_dir)
+    draft_result = _call_codex_with_resume(
+        lambda session_id: planner_a.create_initial_plan(planning_request, run_dir, session_id=session_id),
+        store.get_agent_session_id("planner_a"),
+    )
     draft_path = store.write_artifact(
         "planning/01_planner_a_draft.md",
         draft_result.stdout,
@@ -172,11 +176,15 @@ def run_planning_stage(
             model=config.model,
             reasoning_effort=config.reasoning_effort,
         )
-        review_result = planner_b.review_plan(
-            config.user_request,
-            draft_result.stdout,
-            run_dir,
-            user_feedback=user_feedback,
+        review_result = _call_codex_with_resume(
+            lambda session_id: planner_b.review_plan(
+                config.user_request,
+                draft_result.stdout,
+                run_dir,
+                user_feedback=user_feedback,
+                session_id=session_id,
+            ),
+            store.get_agent_session_id("planner_b"),
         )
         review_text = review_result.stdout
         review_path = store.write_artifact(
@@ -223,12 +231,16 @@ def run_planning_stage(
         _raise_if_planning_cancelled(store)
 
     if config.planner_count >= 2:
-        final_result = planner_a.revise_final_plan(
-            config.user_request,
-            draft_result.stdout,
-            review_text,
-            run_dir,
-            user_feedback=user_feedback,
+        final_result = _call_codex_with_resume(
+            lambda session_id: planner_a.revise_final_plan(
+                config.user_request,
+                draft_result.stdout,
+                review_text,
+                run_dir,
+                user_feedback=user_feedback,
+                session_id=session_id,
+            ),
+            store.get_agent_session_id("planner_a"),
         )
         final_text = final_result.stdout
         store.update_agent_session(
@@ -286,10 +298,14 @@ async def run_planning_stage_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    draft_result = await planner_a.create_initial_plan_async(
-        planning_request,
-        run_dir,
-        process_started=_agent_process_started(process_started, "planner_a"),
+    draft_result = await _call_codex_with_resume_async(
+        lambda session_id: planner_a.create_initial_plan_async(
+            planning_request,
+            run_dir,
+            session_id=session_id,
+            process_started=_agent_process_started(process_started, "planner_a"),
+        ),
+        store.get_agent_session_id("planner_a"),
     )
     draft_path = store.write_artifact(
         "planning/01_planner_a_draft.md",
@@ -317,12 +333,16 @@ async def run_planning_stage_async(
             model=config.model,
             reasoning_effort=config.reasoning_effort,
         )
-        review_result = await planner_b.review_plan_async(
-            config.user_request,
-            draft_result.stdout,
-            run_dir,
-            user_feedback=user_feedback,
-            process_started=_agent_process_started(process_started, "planner_b"),
+        review_result = await _call_codex_with_resume_async(
+            lambda session_id: planner_b.review_plan_async(
+                config.user_request,
+                draft_result.stdout,
+                run_dir,
+                user_feedback=user_feedback,
+                session_id=session_id,
+                process_started=_agent_process_started(process_started, "planner_b"),
+            ),
+            store.get_agent_session_id("planner_b"),
         )
         review_text = review_result.stdout
         review_path = store.write_artifact(
@@ -370,13 +390,17 @@ async def run_planning_stage_async(
         _raise_if_cancelled(store, "Planning cancelled")
 
     if config.planner_count >= 2:
-        final_result = await planner_a.revise_final_plan_async(
-            config.user_request,
-            draft_result.stdout,
-            review_text,
-            run_dir,
-            user_feedback=user_feedback,
-            process_started=_agent_process_started(process_started, "planner_a"),
+        final_result = await _call_codex_with_resume_async(
+            lambda session_id: planner_a.revise_final_plan_async(
+                config.user_request,
+                draft_result.stdout,
+                review_text,
+                run_dir,
+                user_feedback=user_feedback,
+                session_id=session_id,
+                process_started=_agent_process_started(process_started, "planner_a"),
+            ),
+            store.get_agent_session_id("planner_a"),
         )
         final_text = final_result.stdout
         store.update_agent_session(
@@ -423,12 +447,16 @@ def _run_contract(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    result = architect.create_contract_bundle_result(
-        config.user_request,
-        plan_artifacts["planner_a_draft"],
-        plan_artifacts["planner_review"],
-        plan_artifacts["final_plan"],
-        contract_dir,
+    result = _call_codex_with_resume(
+        lambda session_id: architect.create_contract_bundle_result(
+            config.user_request,
+            plan_artifacts["planner_a_draft"],
+            plan_artifacts["planner_review"],
+            plan_artifacts["final_plan"],
+            contract_dir,
+            session_id=session_id,
+        ),
+        store.get_agent_session_id("architect"),
     )
     contract_paths = normalize_contract_bundle(contract_dir, config.user_request, plan_artifacts["final_plan"])
     store.record_artifact("contract_dir", contract_dir)
@@ -471,13 +499,17 @@ async def run_contract_stage_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    result = await architect.create_contract_bundle_result_async(
-        config.user_request,
-        plan_artifacts["planner_a_draft"],
-        plan_artifacts["planner_review"],
-        plan_artifacts["final_plan"],
-        contract_dir,
-        process_started=_agent_process_started(process_started, "architect"),
+    result = await _call_codex_with_resume_async(
+        lambda session_id: architect.create_contract_bundle_result_async(
+            config.user_request,
+            plan_artifacts["planner_a_draft"],
+            plan_artifacts["planner_review"],
+            plan_artifacts["final_plan"],
+            contract_dir,
+            session_id=session_id,
+            process_started=_agent_process_started(process_started, "architect"),
+        ),
+        store.get_agent_session_id("architect"),
     )
     contract_paths = normalize_contract_bundle(contract_dir, config.user_request, plan_artifacts["final_plan"])
     store.record_artifact("contract_dir", contract_dir)
@@ -518,10 +550,14 @@ def _run_scaffold(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    result = scaffold.create_scaffold_result(
-        config.user_request,
-        render_contract_bundle(contract_dir),
-        scaffold_dir,
+    result = _call_codex_with_resume(
+        lambda session_id: scaffold.create_scaffold_result(
+            config.user_request,
+            render_contract_bundle(contract_dir),
+            scaffold_dir,
+            session_id=session_id,
+        ),
+        store.get_agent_session_id("scaffold"),
     )
     store.update_agent_session(
         "scaffold",
@@ -557,11 +593,15 @@ async def run_scaffold_stage_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    result = await scaffold.create_scaffold_result_async(
-        config.user_request,
-        render_contract_bundle(contract_dir),
-        scaffold_dir,
-        process_started=_agent_process_started(process_started, "scaffold"),
+    result = await _call_codex_with_resume_async(
+        lambda session_id: scaffold.create_scaffold_result_async(
+            config.user_request,
+            render_contract_bundle(contract_dir),
+            scaffold_dir,
+            session_id=session_id,
+            process_started=_agent_process_started(process_started, "scaffold"),
+        ),
+        store.get_agent_session_id("scaffold"),
     )
     store.update_agent_session(
         "scaffold",
@@ -622,6 +662,7 @@ async def run_code_agents_stage_async(
                 contract_bundle=contract_bundle,
                 assignment=assignment,
                 logs_dir=logs_dir,
+                session_id=store.get_agent_session_id(assignment.agent_id),
                 process_started=_agent_process_started(process_started, assignment.agent_id),
             )
             for assignment in assignments
@@ -688,13 +729,17 @@ async def run_integration_stage_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    integration_result = await integrator.integrate_result_async(
-        config.user_request,
-        render_contract_bundle(contract_dir),
-        assignment_summary,
-        workspace_listing,
-        run_dir,
-        process_started=_agent_process_started(process_started, "integrator"),
+    integration_result = await _call_codex_with_resume_async(
+        lambda session_id: integrator.integrate_result_async(
+            config.user_request,
+            render_contract_bundle(contract_dir),
+            assignment_summary,
+            workspace_listing,
+            run_dir,
+            session_id=session_id,
+            process_started=_agent_process_started(process_started, "integrator"),
+        ),
+        store.get_agent_session_id("integrator"),
     )
     store.update_agent_session(
         "integrator",
@@ -963,6 +1008,7 @@ async def run_targeted_fix_stage_async(
             feedback=feedback,
             iteration=iteration,
             logs_dir=logs_dir,
+            session_id=store.get_agent_session_id(assignment.agent_id),
             process_started=_agent_process_started(process_started, assignment.agent_id),
         )
         output_path = store.write_artifact(
@@ -1011,15 +1057,19 @@ async def run_targeted_fix_stage_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    repair_result = await integrator.repair_integration_result_async(
-        config.user_request,
-        contract_bundle,
-        assignment_summary,
-        workspace_listing,
-        feedback,
-        run_dir,
-        iteration=iteration,
-        process_started=_agent_process_started(process_started, "integrator"),
+    repair_result = await _call_codex_with_resume_async(
+        lambda session_id: integrator.repair_integration_result_async(
+            config.user_request,
+            contract_bundle,
+            assignment_summary,
+            workspace_listing,
+            feedback,
+            run_dir,
+            iteration=iteration,
+            session_id=session_id,
+            process_started=_agent_process_started(process_started, "integrator"),
+        ),
+        store.get_agent_session_id("integrator"),
     )
     store.update_agent_session(
         "integrator",
@@ -1039,12 +1089,182 @@ async def run_targeted_fix_stage_async(
     return generated_app_dir
 
 
+def build_single_code_assignment(config: LocalRunConfig, generated_app_dir: Path) -> CodeAgentAssignment:
+    return CodeAgentAssignment(
+        agent_id="code_1",
+        codex_home=config.code_agent_codex_homes[0] if config.code_agent_codex_homes else None,
+        workspace_dir=generated_app_dir,
+        tasks=[
+            {
+                "id": "T1",
+                "title": "Complete application implementation",
+                "summary": "Implement the approved app end to end in the generated_app directory.",
+                "dependencies": [],
+                "owned_paths": ["."],
+                "allowed_shared_paths": [],
+                "forbidden_paths": ["contract/", "runs/", "agent_workspaces/", "integration/"],
+                "interfaces": [
+                    "Create the complete runnable app.",
+                    "Create README.md with setup, run, and test instructions.",
+                    "Create codex_app_manifest.json with at least one safe non-interactive check.",
+                ],
+                "acceptance_criteria": [
+                    "The app satisfies the approved plan.",
+                    "The app can be checked by the local QA harness without human input when practical.",
+                ],
+            }
+        ],
+    )
+
+
+def render_single_code_context(final_plan: str, route: Any) -> str:
+    return "\n\n".join(
+        [
+            "# Approved Plan",
+            final_plan.strip() or "(missing final plan)",
+            "# Routing",
+            f"- mode: {getattr(route, 'mode', 'single')}",
+            f"- reason: {getattr(route, 'reason', 'Single-code route selected.')}",
+            "# App Manifest Requirement",
+            (
+                "Create `codex_app_manifest.json` in the app root. It must describe safe local "
+                "setup, test, smoke, server, or browser checks using JSON array commands, not shell strings. "
+                "Prefer checks that need no network and no human input."
+            ),
+        ]
+    )
+
+
+async def run_single_code_stage_async(
+    run_dir: Path,
+    logs_dir: Path,
+    store: StateStore,
+    config: LocalRunConfig,
+    final_plan: str,
+    route: Any,
+    *,
+    running_status: str = "code_agent_running",
+    process_started: Callable[[str, CodexProcessHandle], None] | None = None,
+) -> tuple[Path, CodeAgentAssignment, CodexResult]:
+    generated_app_dir = create_generated_app_dir(run_dir)
+    outputs_dir = create_agent_outputs_dir(run_dir)
+    assignment = build_single_code_assignment(config, generated_app_dir)
+    assignment_summary = render_assignment_summary([assignment])
+
+    store.record_artifact("generated_app", generated_app_dir)
+    store.record_artifact("agent_outputs", outputs_dir)
+    store.write_artifact(
+        "agent_outputs/assignment_summary.md",
+        assignment_summary,
+        artifact_name="assignment_summary",
+    )
+    store.set_status(running_status)
+    store.append_event(
+        "code_agents_started",
+        "system",
+        "Single code agent started",
+        {"agents": [assignment.agent_id], "route": getattr(route, "mode", "single")},
+    )
+    result = await _run_code_agent_assignment_async(
+        config=config,
+        contract_bundle=render_single_code_context(final_plan, route),
+        assignment=assignment,
+        logs_dir=logs_dir,
+        session_id=store.get_agent_session_id(assignment.agent_id),
+        process_started=_agent_process_started(process_started, assignment.agent_id),
+    )
+    output_path = store.write_artifact(
+        "agent_outputs/code_1_summary.md",
+        result.stdout,
+        artifact_name="code_1_summary",
+    )
+    store.update_agent_session(
+        assignment.agent_id,
+        session_id=result.session_id,
+        codex_home=assignment.codex_home,
+        model=result.model,
+        reasoning_effort=result.reasoning_effort,
+        last_step="implement_tasks",
+    )
+    store.append_event(
+        "agent_output",
+        assignment.agent_id,
+        "Code agent completed assigned tasks",
+        {"path": store.to_relative(output_path), **_session_event_data(result)},
+    )
+    store.append_transcript("code_1 Output", result.stdout)
+    normalize_windows_command_files(generated_app_dir)
+    _raise_if_cancelled(store, "Development cancelled")
+    return generated_app_dir, assignment, result
+
+
+async def run_single_code_fix_stage_async(
+    run_dir: Path,
+    logs_dir: Path,
+    store: StateStore,
+    config: LocalRunConfig,
+    final_plan: str,
+    route: Any,
+    assignment: CodeAgentAssignment,
+    qa_result: QAResult,
+    *,
+    iteration: int,
+    process_started: Callable[[str, CodexProcessHandle], None] | None = None,
+) -> CodexResult:
+    store.set_status("fix_running")
+    store.append_event(
+        "fix_routing",
+        "system",
+        "Routed QA fix to single code agent",
+        {
+            "iteration": iteration,
+            "targets": [assignment.agent_id],
+            "affected_paths": qa_result.affected_paths,
+            "suspected_owners": qa_result.suspected_owners,
+        },
+    )
+    result = await _run_code_agent_fix_async(
+        config=config,
+        contract_bundle=render_single_code_context(final_plan, route),
+        assignment=assignment,
+        feedback=qa_result.error_log or qa_result.report_markdown,
+        iteration=iteration,
+        logs_dir=logs_dir,
+        session_id=store.get_agent_session_id(assignment.agent_id),
+        process_started=_agent_process_started(process_started, assignment.agent_id),
+    )
+    output_path = store.write_artifact(
+        f"agent_outputs/code_1_fix_{iteration:02d}.md",
+        result.stdout,
+        artifact_name=f"code_1_fix_{iteration:02d}",
+    )
+    store.update_agent_session(
+        assignment.agent_id,
+        session_id=result.session_id,
+        codex_home=assignment.codex_home,
+        model=result.model,
+        reasoning_effort=result.reasoning_effort,
+        last_step=f"fix_{iteration}",
+    )
+    store.append_event(
+        "agent_output",
+        assignment.agent_id,
+        "Code agent fix completed",
+        {"path": store.to_relative(output_path), **_session_event_data(result)},
+    )
+    store.append_transcript(f"code_1 Fix {iteration}", result.stdout)
+    normalize_windows_command_files(assignment.workspace_dir)
+    _raise_if_cancelled(store, "Development cancelled")
+    return result
+
+
 async def _run_code_agent_assignment_async(
     *,
     config: LocalRunConfig,
     contract_bundle: str,
     assignment: CodeAgentAssignment,
     logs_dir: Path,
+    session_id: str | None = None,
     process_started: Callable[[CodexProcessHandle], None] | None = None,
 ) -> CodexResult:
     code_agent = CodeAgent(
@@ -1055,12 +1275,16 @@ async def _run_code_agent_assignment_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    return await code_agent.implement_tasks_result_async(
-        config.user_request,
-        contract_bundle,
-        assignment.to_prompt_json(),
-        assignment.workspace_dir,
-        process_started=process_started,
+    return await _call_codex_with_resume_async(
+        lambda candidate_session_id: code_agent.implement_tasks_result_async(
+            config.user_request,
+            contract_bundle,
+            assignment.to_prompt_json(),
+            assignment.workspace_dir,
+            session_id=candidate_session_id,
+            process_started=process_started,
+        ),
+        session_id,
     )
 
 
@@ -1072,6 +1296,7 @@ async def _run_code_agent_fix_async(
     feedback: str,
     iteration: int,
     logs_dir: Path,
+    session_id: str | None = None,
     process_started: Callable[[CodexProcessHandle], None] | None = None,
 ) -> CodexResult:
     code_agent = CodeAgent(
@@ -1082,14 +1307,18 @@ async def _run_code_agent_fix_async(
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    return await code_agent.fix_assigned_tasks_result_async(
-        config.user_request,
-        contract_bundle,
-        assignment.to_prompt_json(),
-        feedback,
-        assignment.workspace_dir,
-        iteration=iteration,
-        process_started=process_started,
+    return await _call_codex_with_resume_async(
+        lambda candidate_session_id: code_agent.fix_assigned_tasks_result_async(
+            config.user_request,
+            contract_bundle,
+            assignment.to_prompt_json(),
+            feedback,
+            assignment.workspace_dir,
+            iteration=iteration,
+            session_id=candidate_session_id,
+            process_started=process_started,
+        ),
+        session_id,
     )
 
 
@@ -1186,6 +1415,27 @@ def _agent_process_started(
         process_started(agent_id, handle)
 
     return notify
+
+
+def _call_codex_with_resume(func: Callable[[str | None], CodexResult], session_id: str | None) -> CodexResult:
+    try:
+        return func(session_id)
+    except CodexExecutionError:
+        if not session_id:
+            raise
+        return func(None)
+
+
+async def _call_codex_with_resume_async(
+    func: Callable[[str | None], Any],
+    session_id: str | None,
+) -> CodexResult:
+    try:
+        return await func(session_id)
+    except CodexExecutionError:
+        if not session_id:
+            raise
+        return await func(None)
 
 
 def _raise_if_planning_cancelled(store: StateStore) -> None:

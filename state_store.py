@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -66,15 +68,17 @@ class StateStore:
         return state
 
     def load(self) -> dict[str, Any]:
-        return json.loads(self.state_path.read_text(encoding="utf-8"))
+        return json.loads(_read_state_file(self.state_path))
 
     def save(self, state: dict[str, Any]) -> None:
         state["updated_at"] = _now()
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(
+        tmp_path = self.state_path.with_name(f"{self.state_path.name}.{threading.get_ident()}.tmp")
+        tmp_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        _replace_state_file(tmp_path, self.state_path)
 
     def set_status(self, status: str) -> dict[str, Any]:
         state = self.load()
@@ -279,3 +283,29 @@ def _empty_control() -> dict[str, Any]:
         "requested_by": "",
         "requested_at": None,
     }
+
+
+def _replace_state_file(tmp_path: Path, state_path: Path) -> None:
+    last_error: PermissionError | None = None
+    for attempt in range(8):
+        try:
+            tmp_path.replace(state_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.025 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _read_state_file(state_path: Path) -> str:
+    last_error: PermissionError | None = None
+    for attempt in range(8):
+        try:
+            return state_path.read_text(encoding="utf-8")
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.025 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    return state_path.read_text(encoding="utf-8")

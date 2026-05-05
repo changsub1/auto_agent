@@ -102,7 +102,7 @@ Completed additional Stage 3A scope:
 
 Stage 3A-1 verified with:
 
-- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
 - `python -m unittest discover -s tests`
 - `npm run build`
 - `git diff --check`
@@ -111,7 +111,7 @@ Stage 3A-2 verified with:
 
 - `python -m py_compile agents.py local_dashboard_runner.py workflow_engine.py run_worker.py tests\test_app_services.py`
 - `python -m unittest discover -s tests -p test_app_services.py`
-- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
 - `python -m unittest discover -s tests`
 - `npm run build`
 - `git diff --check`
@@ -120,7 +120,7 @@ LLM QA and fix loop verified with:
 
 - `python -m py_compile agents.py local_dashboard_runner.py workflow_engine.py run_worker.py tests\test_app_services.py`
 - `python -m unittest discover -s tests -p test_app_services.py`
-- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
 - `python -m unittest discover -s tests`
 - `npm run build`
 - `git diff --check`
@@ -129,7 +129,7 @@ Final QA approval policy verified with:
 
 - `python -m py_compile app_services.py tests\test_app_services.py`
 - `python -m unittest discover -s tests -p test_app_services.py`
-- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
+- `python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py`
 - `python -m unittest discover -s tests`
 - `npm run build`
 - `git diff --check`
@@ -147,47 +147,84 @@ Acceptance:
 - QA fix loop runs up to `max_fix_iterations` before the run waits for
   operator QA approval.
 - Operator QA approval moves `awaiting_qa_approval` to `completed`.
+- Fast and balanced routes now execute the cheaper single-code path through
+  `CodeAgent(code_1)`; parallel and manual multi-code routes execute the
+  contract/scaffold/code-agent/integrator path.
+- Shared local workflow helpers now pass stored Codex session ids into
+  follow-up calls and fall back to a fresh call when resume fails with a Codex
+  execution error.
 
 ## Stage 3B: Discord As API Client
 
 Goal: remove long-running workflow execution from Discord bot code.
 
+Current status: initial implementation complete. `discord_bot.py` now wires a
+Discord presentation adapter over the localhost FastAPI API instead of directly
+owning planner/development/QA execution. The older `debate_engine.py` remains in
+the repository as a legacy implementation/reference path, but it is no longer
+the bot entrypoint path.
+
 Implementation tasks:
 
-1. Identify Discord paths that directly call local workflow execution.
+1. Identify Discord paths that directly call local workflow execution. Done:
+   the old direct path is isolated in `debate_engine.py`.
 2. Replace direct execution with FastAPI client calls:
-   - create run
-   - approve plan
-   - request plan changes
-   - cancel run
-   - fetch run detail
-   - fetch events/artifacts
-3. Keep Discord messages as presentation only.
-4. Do not let Discord hold the authoritative workflow state.
+   - create run: done through `LocalApiClient.create_run(...)`
+   - approve plan: done through `LocalApiClient.approve_run(...)`
+   - request plan changes: done through `LocalApiClient.request_changes(...)`
+   - cancel run: done through `LocalApiClient.cancel_run(...)`
+   - fetch run detail: done through `LocalApiClient.get_run(...)`
+   - fetch events/artifacts: done through `LocalApiClient.list_events(...)`,
+     `list_artifacts(...)`, and `read_artifact(...)`
+3. Keep Discord messages as presentation only. Done for the new bot path:
+   `DiscordApiEngine` polls API state and renders Discord messages/buttons.
+4. Do not let Discord hold the authoritative workflow state. Done for the new
+   bot path: run state, approval state, events, and artifacts remain in
+   FastAPI/StateStore.
 5. Add a small API client module for Discord instead of spreading HTTP calls
-   across handlers.
+   across handlers. Done: `discord_api_client.py`.
+
+Stage 3B implementation files:
+
+- `discord_api_client.py`: localhost FastAPI client for Discord.
+- `discord_api_engine.py`: Discord HITL presentation adapter over API state.
+- `discord_bot.py`: now constructs `DiscordApiEngine` instead of
+  `DebateEngine`.
+- `config.py`: adds `DISCORD_LOCAL_API_BASE_URL`, restricted to localhost URLs.
 
 Acceptance:
 
-- Restarting Discord does not kill an active workflow.
+- Restarting Discord does not kill an active workflow because the worker is in
+  the local FastAPI process, not the Discord process.
 - Discord can create, approve, revise, cancel, and inspect runs through API.
 - Web UI and Discord show the same status because both read FastAPI state.
+- API-backed `/status` and `/runs` Discord commands are implemented.
+- Discord progress heartbeats use the Stage 3C active-step and log-tail
+  endpoints for concise status summaries.
+- Remaining hardening: decide whether to remove or quarantine
+  `debate_engine.py`, and rework Discord output further if richer Stage 3C
+  stage summaries are added later.
 
 ## Stage 3C: Execution State And Logs API
 
 Goal: expose enough execution evidence for web UI, Discord, and QA review.
 
+Current status: initial implementation complete. FastAPI now exposes active
+step, log list, log tail, event timeline, and enriched artifact metadata through
+API endpoints, and the React run monitor reads active step/log data through
+those endpoints.
+
 Implementation tasks:
 
 1. Add or finalize API endpoints for:
-   - active step
-   - stage status
-   - event timeline
-   - artifact list and content
-   - stdout/stderr log file list
-   - log tail by file
+   - active step: done with `GET /runs/{run_id}/active-step`
+   - stage status: partially covered by active step and event timeline
+   - event timeline: already exposed through `GET /runs/{run_id}/events`
+   - artifact list and content: enriched with type/stage/role/exists metadata
+   - stdout/stderr log file list: done with `GET /runs/{run_id}/logs`
+   - log tail by file: done with `GET /runs/{run_id}/logs/tail`
 2. Keep polling first. SSE/WebSocket can be added later only if polling is not
-   enough.
+   enough. Done: UI polling remains HTTP polling.
 3. Include process metadata where useful:
    - pid
    - agent_id
@@ -195,11 +232,13 @@ Implementation tasks:
    - started_at
    - interruptible
 4. Ensure log endpoints never allow path traversal outside the run directory.
+   Done for log tail: reads are restricted to the run's `logs/` directory.
 
 Acceptance:
 
 - UI can show running stage, active agent, and recent logs.
-- Discord can summarize progress without reading local files directly.
+- Discord can summarize progress without reading local files directly once the
+  Stage 3B hardening commands consume these endpoints.
 - QA evidence can point to concrete logs, artifacts, screenshots, and reports.
 
 ## Stage 3D: Cancel, Retry, And Recovery
@@ -243,6 +282,8 @@ Acceptance:
 1. Stage 3A first: full workflow after plan approval.
 2. Stage 3C next: expose logs and state needed to observe full workflow.
 3. Stage 3B next: convert Discord to API client once API behavior is stable.
+   Initial conversion is now complete; hardening continues after Stage 3C adds
+   richer observation APIs.
 4. Stage 3D throughout: cancellation and recovery should be added as each stage
    is migrated, then hardened at the end.
 

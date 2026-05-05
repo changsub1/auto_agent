@@ -86,10 +86,15 @@ export type ArtifactInfo = {
   path: string;
   name: string;
   kind: "file" | "image" | "log" | "directory" | "unknown";
+  type?: "file" | "image" | "log" | "directory" | "unknown";
   size_bytes?: number | null;
   modified_at?: string | null;
+  updated_at?: string | null;
   media_type?: string | null;
   source: string;
+  exists?: boolean;
+  stage?: string | null;
+  role?: string | null;
 };
 
 export type ArtifactContent = {
@@ -99,6 +104,43 @@ export type ArtifactContent = {
   media_type?: string | null;
   size_bytes: number;
   encoding: "utf-8" | "base64" | string;
+  content: string;
+  truncated: boolean;
+};
+
+export type ActiveStepInfo = {
+  run_id: string;
+  status: string;
+  stage?: string | null;
+  agent_id?: string | null;
+  pid?: number | null;
+  started_at?: string | null;
+  interruptible: boolean;
+  active: boolean;
+  label: string;
+  updated_at?: string | null;
+  raw: Record<string, unknown>;
+};
+
+export type LogFileInfo = {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+  updated_at: string;
+  stage?: string | null;
+  agent_id?: string | null;
+  stream?: string | null;
+};
+
+export type LogTail = {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+  updated_at: string;
+  line_count: number;
+  encoding: "utf-8" | string;
   content: string;
   truncated: boolean;
 };
@@ -185,6 +227,20 @@ export function getRun(runId: string): Promise<RunDetail> {
 
 export function getEvents(runId: string): Promise<TimelineEvent[]> {
   return apiFetch<TimelineEvent[]>(`/runs/${encodeURIComponent(runId)}/events`);
+}
+
+export function getActiveStep(runId: string): Promise<ActiveStepInfo> {
+  return apiFetch<ActiveStepInfo>(`/runs/${encodeURIComponent(runId)}/active-step`);
+}
+
+export function listLogs(runId: string): Promise<LogFileInfo[]> {
+  return apiFetch<LogFileInfo[]>(`/runs/${encodeURIComponent(runId)}/logs`);
+}
+
+export function readLogTail(runId: string, path: string, lines = 120): Promise<LogTail> {
+  return apiFetch<LogTail>(
+    `/runs/${encodeURIComponent(runId)}/logs/tail?path=${encodeURIComponent(path)}&lines=${lines}`,
+  );
 }
 
 export function listArtifacts(runId: string): Promise<ArtifactInfo[]> {

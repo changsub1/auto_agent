@@ -15,6 +15,7 @@ from app_services import (
     ArtifactService,
     ConfigService,
     EventService,
+    ObservationService,
     OperatorActionRequest,
     RunCreateRequest,
     RunService,
@@ -112,12 +113,17 @@ class AppServiceTests(unittest.TestCase):
         events = EventService(self.project_root).list_events("20260429_120000")
         self.assertGreaterEqual(len(events), 2)
         self.assertEqual(events[-1].who, "Planner A")
+        self.assertEqual(events[-1].summary, "# Plan")
         self.assertEqual(events[-1].artifacts[0].path, "planning/03_final_plan.md")
 
     def test_artifact_service_reads_safe_paths(self) -> None:
         service = ArtifactService(self.project_root)
         artifacts = service.list_artifacts("20260429_120000")
-        self.assertTrue(any(item.path == "planning/03_final_plan.md" for item in artifacts))
+        plan_artifact = next(item for item in artifacts if item.path == "planning/03_final_plan.md")
+        self.assertEqual(plan_artifact.type, "file")
+        self.assertEqual(plan_artifact.stage, "planning")
+        self.assertTrue(plan_artifact.exists)
+        self.assertIsNotNone(plan_artifact.updated_at)
         content = service.read_artifact("20260429_120000", "planning/03_final_plan.md")
         self.assertEqual(content.encoding, "utf-8")
         self.assertIn("# Plan", content.content)
@@ -126,6 +132,36 @@ class AppServiceTests(unittest.TestCase):
         service = ArtifactService(self.project_root)
         with self.assertRaises(FileNotFoundError):
             service.read_artifact("20260429_120000", "../state.json")
+
+    def test_observation_service_reads_active_step_and_log_tail(self) -> None:
+        logs_dir = self.run_dir / "logs"
+        logs_dir.mkdir()
+        log_path = logs_dir / "planner_a_stdout.txt"
+        log_path.write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        self.store.set_active_step(stage="planning", agent_id="planner_a", pid=1234, interruptible=True)
+
+        service = ObservationService(self.project_root)
+        active_step = service.get_active_step("20260429_120000")
+        logs = service.list_logs("20260429_120000")
+        tail = service.read_log_tail("20260429_120000", "logs/planner_a_stdout.txt", lines=2)
+
+        self.assertTrue(active_step.active)
+        self.assertEqual(active_step.stage, "planning")
+        self.assertEqual(active_step.agent_id, "planner_a")
+        self.assertEqual(active_step.pid, 1234)
+        self.assertEqual(logs[0].path, "logs/planner_a_stdout.txt")
+        self.assertEqual(logs[0].stage, "planning")
+        self.assertEqual(logs[0].agent_id, "planner_a")
+        self.assertEqual(logs[0].stream, "stdout")
+        self.assertEqual(tail.content, "line 2\nline 3")
+        self.assertTrue(tail.truncated)
+
+    def test_observation_service_rejects_log_path_traversal(self) -> None:
+        service = ObservationService(self.project_root)
+        with self.assertRaises(FileNotFoundError):
+            service.read_log_tail("20260429_120000", "state.json")
+        with self.assertRaises(FileNotFoundError):
+            service.read_log_tail("20260429_120000", "logs/../state.json")
 
     def test_config_service_reads_codex_model_defaults(self) -> None:
         codex_home = self.project_root / ".codex"
@@ -491,6 +527,21 @@ class WorkflowEngineAsyncDevelopmentTests(unittest.IsolatedAsyncioTestCase):
         store.write_artifact("planning/01_planner_a_draft.md", "# Draft\n", artifact_name="planner_a_draft")
         store.write_artifact("planning/02_planner_b_review.md", "# Review\n", artifact_name="planner_b_review")
         store.write_artifact("planning/03_final_plan.md", "# Final Plan\n", artifact_name="final_plan")
+        state = store.load()
+        state["routing"] = {
+            "requested_mode": "parallel",
+            "mode": "parallel",
+            "reason": "unit test parallel route",
+            "planner_count": 2,
+            "code_agent_count": 2,
+            "qa_agent_count": 0,
+            "pipeline": ["planner_a", "planner_b", "planner_a_final", "architect_contract", "scaffold", "code_agents", "integrator", "mechanical_qa"],
+            "uses_contract": True,
+            "uses_scaffold": True,
+            "uses_integrator": True,
+            "uses_llm_qa": False,
+        }
+        store.save(state)
         store.set_status("development_queued")
 
     def tearDown(self) -> None:
@@ -569,6 +620,57 @@ class WorkflowEngineAsyncDevelopmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(state["artifacts"]["contract_dir"], "contract")
         self.assertEqual(state["artifacts"]["scaffold_app"], "scaffold_app")
+        self.assertEqual(state["artifacts"]["generated_app"], "generated_app")
+
+    async def test_run_development_async_uses_single_code_route_for_balanced(self) -> None:
+        store = StateStore(self.run_dir)
+        state = store.load()
+        state["routing"] = {
+            "requested_mode": "balanced",
+            "mode": "balanced",
+            "reason": "unit test balanced route",
+            "planner_count": 2,
+            "code_agent_count": 1,
+            "qa_agent_count": 0,
+            "pipeline": ["planner_a", "planner_b", "planner_a_final", "code_1", "mechanical_qa"],
+            "uses_contract": False,
+            "uses_scaffold": False,
+            "uses_integrator": False,
+            "uses_llm_qa": False,
+        }
+        store.save(state)
+
+        async def fake_single_code_stage(run_dir, logs_dir, store, config, final_plan, route, **kwargs):
+            generated_app_dir = run_dir / "generated_app"
+            generated_app_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("generated_app", generated_app_dir)
+            return generated_app_dir, object(), None
+
+        async def forbidden_contract_stage(*args, **kwargs):
+            raise AssertionError("balanced route should not run contract stage")
+
+        def fake_mechanical_qa_stage(run_dir, store, generated_app_dir, **kwargs):
+            report_path = run_dir / "qa_report.md"
+            report_path.write_text("# QA\n", encoding="utf-8")
+            return QAResult(
+                ok=True,
+                checked_files=[],
+                error_log="",
+                report_path=report_path,
+                report_markdown="# QA\n",
+                executable_status="PASS",
+                executable_app_type="manifest",
+            )
+
+        with (
+            patch("workflow_engine.run_single_code_stage_async", side_effect=fake_single_code_stage),
+            patch("workflow_engine.run_contract_stage_async", side_effect=forbidden_contract_stage),
+            patch("workflow_engine.run_mechanical_qa_stage", side_effect=fake_mechanical_qa_stage),
+        ):
+            await WorkflowEngine(self.project_root).run_development_async("20260504_120000")
+
+        state = StateStore(self.run_dir).load()
+        self.assertEqual(state["status"], "awaiting_qa_approval")
         self.assertEqual(state["artifacts"]["generated_app"], "generated_app")
 
     async def test_run_development_async_runs_fix_loop_after_qa_failure(self) -> None:

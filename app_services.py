@@ -56,6 +56,7 @@ LOCAL_ENV_KEYS = {
     "EXECUTABLE_QA_ENABLED",
     "EXECUTABLE_QA_TIMEOUT_SECONDS",
     "EXECUTABLE_QA_ALLOW_LOCAL_COMMANDS",
+    "CODEX_CHILD_WINDOWS_SANDBOX",
 }
 
 
@@ -152,10 +153,15 @@ class ArtifactInfo(BaseModel):
     path: str
     name: str
     kind: ArtifactKind
+    type: ArtifactKind
     size_bytes: int | None = None
     modified_at: str | None = None
+    updated_at: str | None = None
     media_type: str | None = None
     source: str = "discovered"
+    exists: bool = True
+    stage: str | None = None
+    role: str | None = None
 
 
 class ArtifactContent(BaseModel):
@@ -165,6 +171,43 @@ class ArtifactContent(BaseModel):
     media_type: str | None
     size_bytes: int
     encoding: str
+    content: str
+    truncated: bool = False
+
+
+class ActiveStepInfo(BaseModel):
+    run_id: str
+    status: str
+    stage: str | None = None
+    agent_id: str | None = None
+    pid: int | None = None
+    started_at: str | None = None
+    interruptible: bool = False
+    active: bool = False
+    label: str = "idle"
+    updated_at: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogFileInfo(BaseModel):
+    path: str
+    name: str
+    size_bytes: int
+    modified_at: str
+    updated_at: str
+    stage: str | None = None
+    agent_id: str | None = None
+    stream: str | None = None
+
+
+class LogTail(BaseModel):
+    path: str
+    name: str
+    size_bytes: int
+    modified_at: str
+    updated_at: str
+    line_count: int
+    encoding: str = "utf-8"
     content: str
     truncated: bool = False
 
@@ -600,16 +643,17 @@ class EventService:
                 raw = json.loads(line)
             except json.JSONDecodeError:
                 raw = {"at": "", "run_id": run_id, "type": "parse_error", "actor": "system", "message": line, "data": {}}
-            events.append(self._timeline_event(run_id, index, raw))
+            events.append(self._timeline_event(run_dir, run_id, index, raw))
         return events
 
-    def _timeline_event(self, run_id: str, index: int, raw: dict[str, Any]) -> TimelineEvent:
+    def _timeline_event(self, run_dir: Path, run_id: str, index: int, raw: dict[str, Any]) -> TimelineEvent:
         event_type = str(raw.get("type") or "event")
         actor = str(raw.get("actor") or "system")
         message = str(raw.get("message") or event_type)
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         artifacts = _event_artifacts(data)
         details = _event_details(data)
+        summary = _event_artifact_preview(run_dir, event_type, data) or _event_summary(event_type, data)
         return TimelineEvent(
             id=f"{index:04d}-{event_type}",
             run_id=run_id,
@@ -620,7 +664,7 @@ class EventService:
             time=_time_label(str(raw.get("at") or "")),
             status=_event_status(event_type, message, data),
             title=message,
-            summary=_event_summary(event_type, data),
+            summary=summary,
             details=details,
             artifacts=artifacts,
             raw=raw,
@@ -706,14 +750,106 @@ class ArtifactService:
 
     def _artifact_info(self, run_dir: Path, path: Path, *, source: str) -> ArtifactInfo:
         stat = path.stat()
+        kind = "directory" if path.is_dir() else _artifact_kind(path)
+        updated_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds")
+        rel_path = path.relative_to(run_dir).as_posix()
         return ArtifactInfo(
-            path=path.relative_to(run_dir).as_posix(),
+            path=rel_path,
             name=path.name,
-            kind="directory" if path.is_dir() else _artifact_kind(path),
+            kind=kind,
+            type=kind,
             size_bytes=None if path.is_dir() else stat.st_size,
-            modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+            modified_at=updated_at,
+            updated_at=updated_at,
             media_type=None if path.is_dir() else mimetypes.guess_type(path.name)[0],
             source=source,
+            exists=path.exists(),
+            stage=_infer_artifact_stage(rel_path),
+            role=_infer_artifact_role(rel_path),
+        )
+
+
+class ObservationService:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        self.runs_root = self.project_root / "runs"
+
+    def get_active_step(self, run_id: str) -> ActiveStepInfo:
+        run_dir = _safe_run_dir(self.runs_root, run_id)
+        state = _read_json(run_dir / "state.json")
+        active = state.get("active_step") if isinstance(state.get("active_step"), dict) else {}
+        stage = _optional_str(active.get("stage"))
+        agent_id = _optional_str(active.get("agent_id"))
+        pid = active.get("pid") if isinstance(active.get("pid"), int) else None
+        label_parts = [part for part in [stage, agent_id, f"pid={pid}" if pid else None] if part]
+        return ActiveStepInfo(
+            run_id=str(state.get("run_id") or run_id),
+            status=str(state.get("status") or "unknown"),
+            stage=stage,
+            agent_id=agent_id,
+            pid=pid,
+            started_at=_optional_str(active.get("started_at")),
+            interruptible=bool(active.get("interruptible")),
+            active=bool(stage),
+            label=", ".join(label_parts) if label_parts else "idle",
+            updated_at=_optional_str(state.get("updated_at")),
+            raw=active,
+        )
+
+    def list_logs(self, run_id: str) -> list[LogFileInfo]:
+        run_dir = _safe_run_dir(self.runs_root, run_id)
+        logs_dir = run_dir / "logs"
+        if not logs_dir.exists():
+            return []
+        logs = [self._log_info(run_dir, path) for path in logs_dir.rglob("*") if path.is_file()]
+        logs.sort(key=lambda item: (item.modified_at, item.path), reverse=True)
+        return logs
+
+    def read_log_tail(self, run_id: str, relative_path: str, *, lines: int = 200, max_bytes: int = 262_144) -> LogTail:
+        run_dir = _safe_run_dir(self.runs_root, run_id)
+        path = _safe_log_path(run_dir, relative_path)
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"Log not found: {relative_path}")
+        stat = path.stat()
+        truncated_by_size = stat.st_size > max_bytes
+        with path.open("rb") as file:
+            if truncated_by_size:
+                file.seek(-max_bytes, os.SEEK_END)
+            data = file.read(max_bytes)
+        text = data.decode("utf-8", errors="replace")
+        split = text.splitlines()
+        if lines < 1:
+            lines = 1
+        selected = split[-lines:]
+        truncated_by_lines = len(split) > len(selected)
+        if truncated_by_size and selected:
+            selected[0] = selected[0].lstrip("\ufeff")
+        content = "\n".join(selected)
+        updated_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds")
+        return LogTail(
+            path=path.relative_to(run_dir).as_posix(),
+            name=path.name,
+            size_bytes=stat.st_size,
+            modified_at=updated_at,
+            updated_at=updated_at,
+            line_count=len(selected),
+            content=content,
+            truncated=truncated_by_size or truncated_by_lines,
+        )
+
+    def _log_info(self, run_dir: Path, path: Path) -> LogFileInfo:
+        stat = path.stat()
+        updated_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds")
+        stage, agent_id, stream = _infer_log_parts(path)
+        return LogFileInfo(
+            path=path.relative_to(run_dir).as_posix(),
+            name=path.name,
+            size_bytes=stat.st_size,
+            modified_at=updated_at,
+            updated_at=updated_at,
+            stage=stage,
+            agent_id=agent_id,
+            stream=stream,
         )
 
 
@@ -791,6 +927,19 @@ def _safe_artifact_path(run_dir: Path, relative_path: str) -> Path:
         path.relative_to(run_root)
     except ValueError as exc:
         raise FileNotFoundError(f"Invalid artifact path: {relative_path}") from exc
+    return path
+
+
+def _safe_log_path(run_dir: Path, relative_path: str) -> Path:
+    rel = Path(relative_path)
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        raise FileNotFoundError(f"Invalid log path: {relative_path}")
+    logs_root = (run_dir / "logs").resolve()
+    path = (run_dir / rel).resolve()
+    try:
+        path.relative_to(logs_root)
+    except ValueError as exc:
+        raise FileNotFoundError(f"Invalid log path: {relative_path}") from exc
     return path
 
 
@@ -952,6 +1101,32 @@ def _event_summary(event_type: str, data: dict[str, Any]) -> str:
     return ""
 
 
+def _event_artifact_preview(run_dir: Path, event_type: str, data: dict[str, Any], *, max_chars: int = 1200) -> str:
+    if event_type != "agent_output":
+        return ""
+    path_value = data.get("path")
+    if not isinstance(path_value, str) or not path_value:
+        return ""
+    try:
+        path = _safe_artifact_path(run_dir, path_value)
+    except FileNotFoundError:
+        return ""
+    if not path.exists() or not path.is_file() or _artifact_kind(path) not in {"file", "log"}:
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return _compact_text(text, max_chars=max_chars)
+
+
+def _compact_text(text: str, *, max_chars: int) -> str:
+    compacted = text.strip()
+    if len(compacted) <= max_chars:
+        return compacted
+    return compacted[: max(0, max_chars - 16)].rstrip() + "\n... truncated"
+
+
 def _event_details(data: dict[str, Any]) -> list[str]:
     details: list[str] = []
     for key in ["mode", "reason", "model", "reasoning_effort", "qa_status", "executable_status", "executable_app_type"]:
@@ -988,6 +1163,86 @@ def _artifact_kind(path: Path) -> ArtifactKind:
     if suffix in {".md", ".txt", ".json", ".jsonl", ".py", ".tsx", ".ts", ".js", ".css", ".html", ".toml", ".yaml", ".yml"}:
         return "file"
     return "unknown"
+
+
+def _infer_artifact_stage(path: str) -> str | None:
+    first = Path(path).parts[0] if Path(path).parts else path
+    mapping = {
+        "planning": "planning",
+        "contract": "contract",
+        "scaffold_app": "scaffold",
+        "agent_workspaces": "code_agents",
+        "agent_outputs": "code_agents",
+        "integration": "integration",
+        "generated_app": "generated_app",
+        "qa": "qa",
+        "logs": "logs",
+    }
+    if path in {"plan.md"}:
+        return "planning"
+    if path in {"qa_report.md"}:
+        return "qa"
+    return mapping.get(first)
+
+
+def _infer_artifact_role(path: str) -> str | None:
+    parts = Path(path).parts
+    joined = "_".join(parts).lower()
+    for role in ["planner_a", "planner_b", "planner_c", "architect", "scaffold", "integrator"]:
+        if role in joined:
+            return role
+    for part in parts:
+        lowered = part.lower()
+        if lowered.startswith("code_") or lowered.startswith("qa_"):
+            return lowered
+    if parts and parts[0] == "contract":
+        return "architect"
+    if parts and parts[0] == "scaffold_app":
+        return "scaffold"
+    if parts and parts[0] == "integration":
+        return "integrator"
+    return None
+
+
+def _infer_log_parts(path: Path) -> tuple[str | None, str | None, str | None]:
+    stem = path.stem
+    parts = stem.split("_")
+    stream = parts[-1] if parts and parts[-1] in {"prompt", "stdout", "stderr", "meta"} else None
+    owner_parts = parts[:-1] if stream else parts
+    owner = "_".join(owner_parts)
+    agent_id = _infer_log_agent(owner)
+    stage = _infer_log_stage(owner, agent_id)
+    return stage, agent_id, stream
+
+
+def _infer_log_agent(owner: str) -> str | None:
+    known = ["planner_a", "planner_b", "planner_c", "architect", "scaffold", "developer", "integrator", "qa"]
+    for agent_id in known:
+        if owner == agent_id or owner.startswith(f"{agent_id}_"):
+            return agent_id
+    for prefix in ["code", "qa"]:
+        parts = owner.split("_")
+        if len(parts) >= 2 and parts[0] == prefix and parts[1].isdigit():
+            return f"{parts[0]}_{parts[1]}"
+    return None
+
+
+def _infer_log_stage(owner: str, agent_id: str | None) -> str | None:
+    if owner.startswith("planning") or (agent_id and agent_id.startswith("planner_")):
+        return "planning"
+    if agent_id == "architect" or owner.startswith("contract"):
+        return "contract"
+    if agent_id == "scaffold" or owner.startswith("scaffold"):
+        return "scaffold"
+    if agent_id and agent_id.startswith("code_"):
+        return "code_agents"
+    if agent_id == "integrator" or owner.startswith("integration"):
+        return "integration"
+    if agent_id and agent_id.startswith("qa"):
+        return "qa"
+    if owner.startswith("fix"):
+        return "fix_loop"
+    return None
 
 
 def _is_binary(data: bytes, media_type: str | None) -> bool:

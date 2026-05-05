@@ -38,6 +38,7 @@ class DiscordBotConfig:
     routing_mode: str
     reference_pack_enabled: bool
     agent_reference_profiles: dict[str, str]
+    local_api_base_url: str
 
 
 def load_discord_bot_config() -> DiscordBotConfig:
@@ -70,6 +71,7 @@ def load_discord_bot_config() -> DiscordBotConfig:
         routing_mode=_routing_mode("ROUTING_MODE"),
         reference_pack_enabled=_bool_value("REFERENCE_PACK_ENABLED", True),
         agent_reference_profiles=_agent_reference_profiles(),
+        local_api_base_url=_local_api_base_url(),
     )
 
 
@@ -175,6 +177,18 @@ def _agent_reference_profiles() -> dict[str, str]:
         except ValueError as exc:
             raise RuntimeError(f"{env_name} must be empty, none, or pack/role.") from exc
     return profiles
+
+
+def _local_api_base_url() -> str:
+    value = os.environ.get("DISCORD_LOCAL_API_BASE_URL", "").strip()
+    if not value:
+        host = os.environ.get("LOCAL_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        port = os.environ.get("LOCAL_API_PORT", "8765").strip() or "8765"
+        value = f"http://{host}:{port}"
+    value = value.rstrip("/")
+    if not (value.startswith("http://127.0.0.1:") or value.startswith("http://localhost:")):
+        raise RuntimeError("DISCORD_LOCAL_API_BASE_URL must point to localhost or 127.0.0.1.")
+    return value
 
 
 def _legacy_reference_pack_requested(role_env_names: object) -> bool:

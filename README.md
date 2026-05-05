@@ -51,6 +51,14 @@ python -m pip install -r requirements.txt
 dependencies. Codex itself must be installed separately and available as
 `codex` on PATH.
 
+For the Tauri desktop app, prefer installing these dependencies into the
+repo-local `.venv`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
 ## Local CLI Usage
 
 ```bash
@@ -83,6 +91,7 @@ Optional controls:
 ```bat
 set DISCORD_ALLOWED_CHANNEL_ID=channel_id
 set DISCORD_ALLOWED_USER_IDS=user_id_1,user_id_2
+set DISCORD_LOCAL_API_BASE_URL=http://127.0.0.1:8765
 set PLANNER_A_CODEX_HOME=C:\Users\USER\.codex_planner_a
 set PLANNER_B_CODEX_HOME=C:\Users\USER\.codex_planner_b
 set ARCHITECT_CODEX_HOME=C:\Users\USER\.codex_architect
@@ -106,7 +115,14 @@ set MAX_FIX_ITERATIONS=1
 set CODEX_TIMEOUT_SECONDS=900
 ```
 
-Run the bot:
+Run the local API first, then run the bot in a separate terminal. Runtime
+defaults that affect execution, such as Codex homes, routing, model/reasoning,
+reference profiles, and executable QA settings, must be visible to the local API
+process because FastAPI owns the workflow state and execution.
+
+```bash
+python run_local_api.py --host 127.0.0.1 --port 8765
+```
 
 ```bash
 python discord_bot.py
@@ -116,25 +132,33 @@ In Discord:
 
 ```text
 /dev CSV file upload app that previews data and shows missing value counts.
+/runs limit:10
+/status run_id:20260505_010000
 ```
 
-The bot posts Planner A's draft, Planner B's review, Planner A's final plan,
-and the Architect contract bundle summary. The requesting user then gets
-buttons:
+The bot controls runs through the localhost FastAPI API. It posts Planner A's
+draft, Planner B's review, and Planner A's final plan after the API worker
+finishes planning. The requesting user then gets buttons:
 
 - Approve
 - Request changes
 - Cancel
 
-Approval starts the selected routing pipeline. Fast and balanced routes use one
-`CodeAgent`; the parallel route starts scaffold, parallel Code Agents,
-integration, and QA. A contract or plan revision request sends the feedback
-back into the planning loop. After QA, the
-bot posts the report and any screenshots, then asks the requester to approve
-the result or request implementation fixes. Fixes are routed to the owning
-`code_N` session when QA identifies an owned path or suspected owner; shared,
-cross-agent, or unknown issues go to the Integrator. `DeveloperAgent` remains
-only for the legacy single-developer CLI path.
+Approval starts the selected routing pipeline through the same FastAPI worker
+used by the local app. Fast and balanced routes use one `CodeAgent`; the
+parallel route starts scaffold, parallel Code Agents, integration, and QA. A
+plan revision request sends the feedback back into the API planning queue. After
+QA, the bot posts the report and any screenshots, then asks the requester to
+approve the result or record an implementation fix request. Operator-requested
+QA fixes after this checkpoint are recorded by the API but are not re-enqueued
+yet; automatic QA fix loops still run before the workflow reaches
+`awaiting_qa_approval`.
+
+`/runs` and `/status` are read-only Discord commands backed by the local API.
+`/status` includes the current active step and a short recent log tail from the
+Stage 3C observation endpoints. During long-running `/dev` flows, Discord
+progress heartbeats also use `active-step` and `logs/tail` API data instead of
+reading run files directly.
 
 `ROUTING_MODE` controls the development pipeline. The default is `balanced`:
 
@@ -198,10 +222,11 @@ The dashboard supports:
 - `contract_only`
 - `scaffold_only`
 
-`full_run` is shown but disabled for now because the Discord approval workflow
-still owns full scaffold/code/integration/QA execution. The dashboard reuses the
-same environment variable defaults as the Discord bot, including `CODEX_HOME`,
-model, reasoning effort, timeouts, and code-agent counts.
+`full_run` is still disabled in the Streamlit dashboard because Streamlit remains
+a lightweight stage test panel. Full implementation now runs through the
+FastAPI `RunWorker` path after plan approval. The dashboard reuses the same
+environment variable defaults as the Discord bot, including `CODEX_HOME`, model,
+reasoning effort, timeouts, and code-agent counts.
 
 The dashboard displays:
 
@@ -238,6 +263,9 @@ Available local endpoints include:
 - `GET /runs`
 - `GET /runs/{run_id}`
 - `GET /runs/{run_id}/events`
+- `GET /runs/{run_id}/active-step`
+- `GET /runs/{run_id}/logs`
+- `GET /runs/{run_id}/logs/tail?path=...&lines=...`
 - `GET /runs/{run_id}/artifacts`
 - `GET /runs/{run_id}/artifacts/content?path=...`
 - `POST /runs/{run_id}/approve`
@@ -250,12 +278,19 @@ Available local endpoints include:
 enqueues background planning through the local FastAPI run worker. The UI can
 poll run detail, events, and artifacts while planning is in progress. Approval,
 revision, and cancel actions are persisted through the same service layer and
-enqueue worker jobs when possible.
+enqueue worker jobs.
 
-The current worker stops at a `development_queued` checkpoint after plan or
-contract approval. Full contract/scaffold/code/integration/QA execution still
-needs to be moved out of the Discord-owned orchestration path before the app can
-run the complete implementation pipeline by itself.
+Plan approval now continues the implementation workflow through
+`WorkflowEngine` instead of stopping at `development_queued`. Fast and balanced
+routes run a single `CodeAgent(code_1)` directly against `generated_app`, then
+mechanical QA and optional LLM QA. Parallel and manual multi-code routes run the
+contract/scaffold/parallel-code/integrator/QA pipeline. The run then waits at
+`awaiting_qa_approval` for the operator to approve the result or request later
+fix work.
+
+Observation endpoints expose active worker state, structured artifact metadata,
+and log tails without requiring clients to read files directly. Log reads are
+restricted to files under each run's `logs/` directory.
 
 ## React/Tauri App Usage
 
@@ -266,8 +301,8 @@ Development mode:
 
 ```bash
 cd ux
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 In a separate terminal:
@@ -280,12 +315,37 @@ Tauri desktop mode:
 
 ```bash
 cd ux
-pnpm tauri:dev
+npm run tauri:dev
 ```
 
 The Tauri shell chooses a free local port, starts `run_local_api.py` as a
 sidecar process, and gives the React UI the API URL through the `api_base_url`
-Tauri command. The first packaging target is Windows NSIS.
+Tauri command. It uses `ORCHESTRA_PYTHON` when set; otherwise it prefers
+`../.venv/Scripts/python.exe` for the sidecar before falling back to system
+Python.
+It waits for `/health` before the app is considered ready and writes sidecar
+stdout/stderr to `tmp/tauri_sidecar/`. The first packaging target is Windows
+NSIS.
+
+Useful Tauri sidecar overrides:
+
+```powershell
+set ORCHESTRA_REPO_ROOT=D:\curs\auto\multi_codex_dev_mvp
+set ORCHESTRA_PYTHON=D:\curs\auto\multi_codex_dev_mvp\.venv\Scripts\python.exe
+```
+
+Rust/Cargo must be installed before `pnpm tauri:dev` or `pnpm tauri:build` can
+compile the desktop shell.
+The project uses npm scripts for Tauri commands, so pnpm is optional.
+
+## Current Roadmap
+
+Stage 3 is complete for the local API workflow and Discord adapter MVP. The
+next step is Stage 4: finish the app surface, package it as a local desktop app,
+and dogfood it on real personal development requests before final cleanup.
+
+See `STAGE4_APP_COMPLETION_PACKAGING_PLAN.md` for the detailed app completion,
+sidecar hardening, Windows packaging, and dogfooding plan.
 
 ## Run Output
 
@@ -353,14 +413,15 @@ runs/YYYYMMDD_HHMMSS/
 
 ## Session and Memory Design
 
-The Discord workflow is session-oriented.
+The local worker and Discord workflow are session-oriented.
 
 - Each agent has its own Codex session id in `state.json`.
 - New agent calls use `codex exec ... -`.
 - Follow-up calls try `codex exec resume <session_id> -`.
 - Prompts are sent through stdin, not shell interpolation.
-- If resume fails, the engine falls back to a fresh Codex call using the latest
-  relevant artifact instead of the full transcript.
+- If resume fails with a Codex execution error, the shared local workflow helpers
+  fall back to a fresh Codex call using the latest relevant artifact instead of
+  the full transcript.
 
 Local files are still written for audit and recovery:
 
@@ -434,5 +495,5 @@ set DEVELOPER_CODEX_HOME=D:\codex_profiles\account_2
 ## Syntax Check
 
 ```bash
-python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_bot.py dashboard.py
+python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py
 ```

@@ -137,7 +137,7 @@ def run_codex_result(
         raise FileNotFoundError(f"Work directory does not exist: {workdir}")
 
     stripped_env_names = _codex_env_names_to_strip(os.environ)
-    windows_sandbox = os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX", "").strip()
+    windows_sandbox = _windows_sandbox_config(sandbox)
     env = _clean_child_codex_env(os.environ)
     if codex_home:
         env["CODEX_HOME"] = codex_home
@@ -296,7 +296,7 @@ async def run_codex_result_async(
         raise FileNotFoundError(f"Work directory does not exist: {workdir}")
 
     stripped_env_names = _codex_env_names_to_strip(os.environ)
-    windows_sandbox = os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX", "").strip()
+    windows_sandbox = _windows_sandbox_config(sandbox)
     env = _clean_child_codex_env(os.environ)
     if codex_home:
         env["CODEX_HOME"] = codex_home
@@ -609,6 +609,15 @@ def _clean_child_codex_env(source_env: os._Environ[str]) -> dict[str, str]:
     for name in _codex_env_names_to_strip(source_env):
         env.pop(name, None)
     return env
+
+
+def _windows_sandbox_config(sandbox: str) -> str:
+    configured = os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX", "").strip()
+    if configured:
+        return configured
+    if os.name == "nt" and sandbox != "read-only":
+        return "elevated"
+    return ""
 
 
 def _build_command(

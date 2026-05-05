@@ -10,12 +10,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app_services import (
+    ActiveStepInfo,
     ArtifactContent,
     ArtifactInfo,
     ArtifactService,
     ConfigService,
     ConfigSnapshot,
     EventService,
+    LogFileInfo,
+    LogTail,
+    ObservationService,
     OperatorActionRequest,
     RunCreateRequest,
     RunDetail,
@@ -35,6 +39,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     run_service = RunService(root, worker=worker)
     event_service = EventService(root)
     artifact_service = ArtifactService(root)
+    observation_service = ObservationService(root)
     config_service = ConfigService(root)
 
     @asynccontextmanager
@@ -96,6 +101,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def get_events(run_id: str) -> list[TimelineEvent]:
         try:
             return event_service.list_events(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/active-step", response_model=ActiveStepInfo)
+    def get_active_step(run_id: str) -> ActiveStepInfo:
+        try:
+            return observation_service.get_active_step(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/logs", response_model=list[LogFileInfo])
+    def get_logs(run_id: str) -> list[LogFileInfo]:
+        try:
+            return observation_service.list_logs(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/logs/tail", response_model=LogTail)
+    def get_log_tail(
+        run_id: str,
+        path: Annotated[str, Query(min_length=1)],
+        lines: Annotated[int, Query(ge=1, le=1000)] = 200,
+    ) -> LogTail:
+        try:
+            return observation_service.read_log_tail(run_id, path, lines=lines)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
