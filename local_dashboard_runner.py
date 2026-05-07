@@ -59,6 +59,7 @@ class LocalRunConfig:
     qa_agent_codex_homes: list[str | None]
     model: str | None
     reasoning_effort: str | None
+    agent_configs: dict[str, dict[str, object]]
     max_fix_iterations: int
     timeout_seconds: int
 
@@ -80,6 +81,7 @@ class LocalRunConfig:
             qa_agent_codex_homes=_str_list_env("QA_AGENT_CODEX_HOMES"),
             model=_str_env("CODEX_MODEL"),
             reasoning_effort=_str_env("CODEX_REASONING_EFFORT"),
+            agent_configs={},
             max_fix_iterations=_int_env("MAX_FIX_ITERATIONS", 1),
             timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 900),
         )
@@ -140,11 +142,9 @@ def run_planning_stage(
             ]
         )
     planner_a = PlannerAgentA(
-        codex_home=config.planner_a_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = _call_codex_with_resume(
         lambda session_id: planner_a.create_initial_plan(planning_request, run_dir, session_id=session_id),
@@ -158,7 +158,7 @@ def run_planning_stage(
     store.update_agent_session(
         "planner_a",
         session_id=draft_result.session_id,
-        codex_home=config.planner_a_codex_home,
+        codex_home=_agent_codex_home(config, "planner_a", config.planner_a_codex_home),
         model=draft_result.model,
         reasoning_effort=draft_result.reasoning_effort,
         last_step="draft",
@@ -170,11 +170,9 @@ def run_planning_stage(
     review_text = "(planner review skipped because planner_count is 1)"
     if config.planner_count >= 2:
         planner_b = PlannerAgentB(
-            codex_home=config.planner_b_codex_home,
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            model=config.model,
-            reasoning_effort=config.reasoning_effort,
+            **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = _call_codex_with_resume(
             lambda session_id: planner_b.review_plan(
@@ -195,7 +193,7 @@ def run_planning_stage(
         store.update_agent_session(
             "planner_b",
             session_id=review_result.session_id,
-            codex_home=config.planner_b_codex_home,
+            codex_home=_agent_codex_home(config, "planner_b", config.planner_b_codex_home),
             model=review_result.model,
             reasoning_effort=review_result.reasoning_effort,
             last_step="review",
@@ -220,7 +218,7 @@ def run_planning_stage(
         store.update_agent_session(
             "planner_c",
             session_id=planner_c_result.session_id,
-            codex_home=config.planner_c_codex_home,
+            codex_home=_agent_codex_home(config, "planner_c", config.planner_c_codex_home),
             model=planner_c_result.model,
             reasoning_effort=planner_c_result.reasoning_effort,
             last_step="risk_review",
@@ -246,7 +244,7 @@ def run_planning_stage(
         store.update_agent_session(
             "planner_a",
             session_id=final_result.session_id,
-            codex_home=config.planner_a_codex_home,
+            codex_home=_agent_codex_home(config, "planner_a", config.planner_a_codex_home),
             model=final_result.model,
             reasoning_effort=final_result.reasoning_effort,
             last_step="final_plan",
@@ -292,11 +290,9 @@ async def run_planning_stage_async(
             ]
         )
     planner_a = PlannerAgentA(
-        codex_home=config.planner_a_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = await _call_codex_with_resume_async(
         lambda session_id: planner_a.create_initial_plan_async(
@@ -315,7 +311,7 @@ async def run_planning_stage_async(
     store.update_agent_session(
         "planner_a",
         session_id=draft_result.session_id,
-        codex_home=config.planner_a_codex_home,
+        codex_home=_agent_codex_home(config, "planner_a", config.planner_a_codex_home),
         model=draft_result.model,
         reasoning_effort=draft_result.reasoning_effort,
         last_step="draft",
@@ -327,11 +323,9 @@ async def run_planning_stage_async(
     review_text = "(planner review skipped because planner_count is 1)"
     if config.planner_count >= 2:
         planner_b = PlannerAgentB(
-            codex_home=config.planner_b_codex_home,
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            model=config.model,
-            reasoning_effort=config.reasoning_effort,
+            **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = await _call_codex_with_resume_async(
             lambda session_id: planner_b.review_plan_async(
@@ -353,7 +347,7 @@ async def run_planning_stage_async(
         store.update_agent_session(
             "planner_b",
             session_id=review_result.session_id,
-            codex_home=config.planner_b_codex_home,
+            codex_home=_agent_codex_home(config, "planner_b", config.planner_b_codex_home),
             model=review_result.model,
             reasoning_effort=review_result.reasoning_effort,
             last_step="review",
@@ -379,7 +373,7 @@ async def run_planning_stage_async(
         store.update_agent_session(
             "planner_c",
             session_id=planner_c_result.session_id,
-            codex_home=config.planner_c_codex_home,
+            codex_home=_agent_codex_home(config, "planner_c", config.planner_c_codex_home),
             model=planner_c_result.model,
             reasoning_effort=planner_c_result.reasoning_effort,
             last_step="risk_review",
@@ -406,7 +400,7 @@ async def run_planning_stage_async(
         store.update_agent_session(
             "planner_a",
             session_id=final_result.session_id,
-            codex_home=config.planner_a_codex_home,
+            codex_home=_agent_codex_home(config, "planner_a", config.planner_a_codex_home),
             model=final_result.model,
             reasoning_effort=final_result.reasoning_effort,
             last_step="final_plan",
@@ -441,11 +435,9 @@ def _run_contract(
     store.set_status("dashboard_contract_running")
     contract_dir = create_contract_dir(run_dir)
     architect = ArchitectAgent(
-        codex_home=config.architect_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "architect", config.architect_codex_home),
     )
     result = _call_codex_with_resume(
         lambda session_id: architect.create_contract_bundle_result(
@@ -465,7 +457,7 @@ def _run_contract(
     store.update_agent_session(
         "architect",
         session_id=result.session_id,
-        codex_home=config.architect_codex_home,
+        codex_home=_agent_codex_home(config, "architect", config.architect_codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step="contract_bundle",
@@ -493,11 +485,9 @@ async def run_contract_stage_async(
     store.set_status(running_status)
     contract_dir = create_contract_dir(run_dir)
     architect = ArchitectAgent(
-        codex_home=config.architect_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "architect", config.architect_codex_home),
     )
     result = await _call_codex_with_resume_async(
         lambda session_id: architect.create_contract_bundle_result_async(
@@ -518,7 +508,7 @@ async def run_contract_stage_async(
     store.update_agent_session(
         "architect",
         session_id=result.session_id,
-        codex_home=config.architect_codex_home,
+        codex_home=_agent_codex_home(config, "architect", config.architect_codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step="contract_bundle",
@@ -544,11 +534,9 @@ def _run_scaffold(
     store.set_status("dashboard_scaffold_running")
     scaffold_dir = create_scaffold_dir(run_dir)
     scaffold = ScaffoldAgent(
-        codex_home=config.scaffold_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "scaffold", config.scaffold_codex_home),
     )
     result = _call_codex_with_resume(
         lambda session_id: scaffold.create_scaffold_result(
@@ -562,7 +550,7 @@ def _run_scaffold(
     store.update_agent_session(
         "scaffold",
         session_id=result.session_id,
-        codex_home=config.scaffold_codex_home,
+        codex_home=_agent_codex_home(config, "scaffold", config.scaffold_codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step="scaffold_app",
@@ -587,11 +575,9 @@ async def run_scaffold_stage_async(
     store.set_status(running_status)
     scaffold_dir = create_scaffold_dir(run_dir)
     scaffold = ScaffoldAgent(
-        codex_home=config.scaffold_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "scaffold", config.scaffold_codex_home),
     )
     result = await _call_codex_with_resume_async(
         lambda session_id: scaffold.create_scaffold_result_async(
@@ -606,7 +592,7 @@ async def run_scaffold_stage_async(
     store.update_agent_session(
         "scaffold",
         session_id=result.session_id,
-        codex_home=config.scaffold_codex_home,
+        codex_home=_agent_codex_home(config, "scaffold", config.scaffold_codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step="scaffold_app",
@@ -677,7 +663,7 @@ async def run_code_agents_stage_async(
         store.update_agent_session(
             assignment.agent_id,
             session_id=code_result.session_id,
-            codex_home=assignment.codex_home,
+            codex_home=_agent_codex_home(config, assignment.agent_id, assignment.codex_home),
             model=code_result.model,
             reasoning_effort=code_result.reasoning_effort,
             last_step="implement_tasks",
@@ -723,11 +709,9 @@ async def run_integration_stage_async(
         ]
     )
     integrator = IntegratorAgent(
-        codex_home=config.integrator_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     integration_result = await _call_codex_with_resume_async(
         lambda session_id: integrator.integrate_result_async(
@@ -744,7 +728,7 @@ async def run_integration_stage_async(
     store.update_agent_session(
         "integrator",
         session_id=integration_result.session_id,
-        codex_home=config.integrator_codex_home,
+        codex_home=_agent_codex_home(config, "integrator", config.integrator_codex_home),
         model=integration_result.model,
         reasoning_effort=integration_result.reasoning_effort,
         last_step="integrated_app",
@@ -846,11 +830,9 @@ async def run_llm_qa_stage_async(
         codex_home = config.qa_agent_codex_homes[(index - 1) % len(config.qa_agent_codex_homes)] if config.qa_agent_codex_homes else None
         agent = QAAgent(
             agent_id=agent_id,
-            codex_home=codex_home,
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            model=config.model,
-            reasoning_effort=config.reasoning_effort,
+            **_agent_run_kwargs(config, agent_id, codex_home),
         )
         result = await agent.review_result_async(
             config.user_request,
@@ -884,7 +866,7 @@ async def run_llm_qa_stage_async(
         store.update_agent_session(
             agent_id,
             session_id=result.session_id,
-            codex_home=codex_home,
+            codex_home=_agent_codex_home(config, agent_id, codex_home),
             model=result.model,
             reasoning_effort=result.reasoning_effort,
             last_step=f"review_attempt_{attempt_index}",
@@ -1019,7 +1001,7 @@ async def run_targeted_fix_stage_async(
         store.update_agent_session(
             assignment.agent_id,
             session_id=result.session_id,
-            codex_home=assignment.codex_home,
+            codex_home=_agent_codex_home(config, assignment.agent_id, assignment.codex_home),
             model=result.model,
             reasoning_effort=result.reasoning_effort,
             last_step=f"fix_{iteration}",
@@ -1051,11 +1033,9 @@ async def run_targeted_fix_stage_async(
         ]
     )
     integrator = IntegratorAgent(
-        codex_home=config.integrator_codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     repair_result = await _call_codex_with_resume_async(
         lambda session_id: integrator.repair_integration_result_async(
@@ -1074,7 +1054,7 @@ async def run_targeted_fix_stage_async(
     store.update_agent_session(
         "integrator",
         session_id=repair_result.session_id,
-        codex_home=config.integrator_codex_home,
+        codex_home=_agent_codex_home(config, "integrator", config.integrator_codex_home),
         model=repair_result.model,
         reasoning_effort=repair_result.reasoning_effort,
         last_step=f"fix_{iteration}",
@@ -1181,7 +1161,7 @@ async def run_single_code_stage_async(
     store.update_agent_session(
         assignment.agent_id,
         session_id=result.session_id,
-        codex_home=assignment.codex_home,
+        codex_home=_agent_codex_home(config, assignment.agent_id, assignment.codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step="implement_tasks",
@@ -1241,7 +1221,7 @@ async def run_single_code_fix_stage_async(
     store.update_agent_session(
         assignment.agent_id,
         session_id=result.session_id,
-        codex_home=assignment.codex_home,
+        codex_home=_agent_codex_home(config, assignment.agent_id, assignment.codex_home),
         model=result.model,
         reasoning_effort=result.reasoning_effort,
         last_step=f"fix_{iteration}",
@@ -1269,11 +1249,9 @@ async def _run_code_agent_assignment_async(
 ) -> CodexResult:
     code_agent = CodeAgent(
         agent_id=assignment.agent_id,
-        codex_home=assignment.codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
         lambda candidate_session_id: code_agent.implement_tasks_result_async(
@@ -1301,11 +1279,9 @@ async def _run_code_agent_fix_async(
 ) -> CodexResult:
     code_agent = CodeAgent(
         agent_id=assignment.agent_id,
-        codex_home=assignment.codex_home,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
         lambda candidate_session_id: code_agent.fix_assigned_tasks_result_async(
@@ -1352,13 +1328,11 @@ def _run_planner_c_review(
     return run_codex_result(
         prompt,
         workdir=run_dir,
-        codex_home=config.planner_c_codex_home,
         timeout=config.timeout_seconds,
         logs_dir=logs_dir,
         label="planner_c_risk_review",
         sandbox="workspace-write",
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "planner_c", config.planner_c_codex_home),
     )
 
 
@@ -1393,13 +1367,11 @@ async def _run_planner_c_review_async(
     return await run_codex_result_async(
         prompt,
         workdir=run_dir,
-        codex_home=config.planner_c_codex_home,
         timeout=config.timeout_seconds,
         logs_dir=logs_dir,
         label="planner_c_risk_review",
         sandbox="workspace-write",
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
+        **_agent_run_kwargs(config, "planner_c", config.planner_c_codex_home),
         process_started=process_started,
     )
 
@@ -1457,6 +1429,48 @@ def _session_event_data(result: CodexResult) -> dict[str, str | None]:
         "model": result.model,
         "reasoning_effort": result.reasoning_effort,
     }
+
+
+def _agent_run_kwargs(config: LocalRunConfig, agent_id: str, codex_home: str | None) -> dict[str, str | None]:
+    return {
+        "codex_home": _agent_codex_home(config, agent_id, codex_home),
+        "model": _agent_model(config, agent_id),
+        "reasoning_effort": _agent_reasoning_effort(config, agent_id),
+    }
+
+
+def _agent_codex_home(config: LocalRunConfig, agent_id: str, fallback: str | None) -> str | None:
+    agent_config = _agent_config(config, agent_id)
+    return _config_str(agent_config.get("codex_home")) or fallback
+
+
+def _agent_model(config: LocalRunConfig, agent_id: str) -> str | None:
+    agent_config = _agent_config(config, agent_id)
+    return _config_str(agent_config.get("model")) or config.model
+
+
+def _agent_reasoning_effort(config: LocalRunConfig, agent_id: str) -> str | None:
+    agent_config = _agent_config(config, agent_id)
+    return _config_str(agent_config.get("reasoning_effort")) or config.reasoning_effort
+
+
+def _agent_config(config: LocalRunConfig, agent_id: str) -> dict[str, object]:
+    agent_config = config.agent_configs.get(agent_id) if isinstance(config.agent_configs, dict) else None
+    if not isinstance(agent_config, dict):
+        agent_config = {}
+    provider = str(agent_config.get("provider") or "codex").lower()
+    if provider not in {"codex", "local", "manual"}:
+        raise ValueError(f"Unsupported provider for {agent_id}: {provider}")
+    if provider not in {"codex"}:
+        raise ValueError(f"Provider {provider} is not executable for {agent_id} yet.")
+    return agent_config
+
+
+def _config_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _record_qa_artifacts(store: StateStore, qa_result: QAResult) -> None:

@@ -25,6 +25,22 @@ implementation, mechanical QA, and QA approval, and shows a cleaner
 agent-output-focused run timeline. Windows installer packaging remains the main
 Stage 4C gap.
 
+Stage 5 should move terminal-based setup and routing controls into the GUI:
+provider login/status, model and reasoning dropdowns, usage limits, Discord bot
+control, diagnostics, and a real manual agent graph builder.  The detailed plan
+is in `STAGE5_PROVIDER_SETTINGS_AGENT_GRAPH_PLAN.md`.
+
+The first Stage 5A slice is implemented: the local API exposes provider health,
+Codex login status, Codex model catalog data, runtime health, and Codex 5-hour
+and weekly usage limits through `codex app-server account/rateLimits/read`; the
+React `Resources` panel displays those values.
+
+Stage 5B-1 is implemented as a global default selector MVP: the roster sidebar
+now lets the user choose Codex account, model, and reasoning level from
+dropdowns, shows those choices on agent cards, and sends them into run creation
+so `dashboard_config` records the selected model, reasoning effort, and Codex
+home.
+
 ## Phase 1: Implemented
 
 ### Local Codex CLI Integration
@@ -314,6 +330,13 @@ Complete the product in this order:
    - Per-agent account/model/reasoning selection.
    - Real manual-mode agent registry.
    - Better run history and status filtering.
+7. Move provider setup and manual graph control into the desktop app.
+   - Codex/Claude install and login status.
+   - Model and reasoning dropdowns from provider catalogs.
+   - Usage limit display where available.
+   - Discord bot start/stop and diagnostics.
+   - Per-agent provider/account/model/reasoning configuration.
+   - Validated manual workflow graph execution.
 
 ### 1. Routing Core Before More UI
 
@@ -563,3 +586,29 @@ Do not commit:
 - Codex auth/cache directories
 
 Use `.gitignore` to keep generated run artifacts and local caches out of Git.
+# Stage 5B Status Update
+
+- Stage 5B is implemented as the current desktop settings slice. The roster can
+  select global Codex defaults, override account/model/reasoning per Codex
+  agent card, persist those choices through `local_app_settings.json`, and pass
+  exact `agent_configs` into run creation.
+- The workflow runner now prefers per-agent settings when launching Codex and
+  recording resumed sessions.
+- Remaining Stage 5 work is the larger product layer: manual graph execution
+  (Stage 5C), Discord bot supervisor controls, diagnostics/setup assistant, and
+  packaged-app follow-up.
+- Stage 5C planning is documented in `STAGE5C_MANUAL_AGENT_GRAPH_PLAN.md`.
+- Stage 5C-1 is implemented: manual mode now derives a workflow graph from the
+  enabled agent cards, previews it in the roster, sends it on run creation, and
+  the backend validates/stores it as `workflow.graph` plus
+  `workflow_graph.json`. Actual graph-based execution is still Stage 5C-2.
+- Stage 5C-2 is implemented as a constrained execution MVP: manual
+  `workflow.graph` now drives development route capabilities/counts, single-code
+  graphs use the single-code path, parallel-code graphs with integration use the
+  existing contract/scaffold/parallel/integration path, and graph boundary
+  events are emitted. Full drag/reorder editing remains Stage 5C-3.
+- Stage 5C-3 is implemented as a stage-card graph editor: manual stage cards
+  show assigned agents such as `Code Agent 1 + Code Agent 2`, mark parallel
+  stages explicitly, can be reordered by drag/drop or arrow controls,
+  integration can be toggled, reset restores the default order, and the edited
+  order is used for `workflow_graph`.

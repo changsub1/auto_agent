@@ -17,14 +17,21 @@ from app_services import (
     ConfigService,
     ConfigSnapshot,
     EventService,
+    LocalAppSettings,
     LogFileInfo,
     LogTail,
     ObservationService,
     OperatorActionRequest,
+    ProviderCliStatus,
+    ProviderModelCatalog,
+    ProviderService,
     RunCreateRequest,
     RunDetail,
     RunService,
     RunSummary,
+    RuntimeHealthSnapshot,
+    RuntimeUsageSnapshot,
+    SettingsService,
     TimelineEvent,
 )
 from run_worker import RunWorker
@@ -41,6 +48,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     artifact_service = ArtifactService(root)
     observation_service = ObservationService(root)
     config_service = ConfigService(root)
+    provider_service = ProviderService(root)
+    settings_service = SettingsService(root)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -78,6 +87,38 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/config", response_model=ConfigSnapshot)
     def config() -> ConfigSnapshot:
         return config_service.get_config()
+
+    @app.get("/settings", response_model=LocalAppSettings)
+    def settings() -> LocalAppSettings:
+        return settings_service.get_settings()
+
+    @app.put("/settings", response_model=LocalAppSettings)
+    def save_settings(payload: LocalAppSettings) -> LocalAppSettings:
+        return settings_service.save_settings(payload)
+
+    @app.get("/providers", response_model=list[ProviderCliStatus])
+    def providers() -> list[ProviderCliStatus]:
+        return provider_service.list_providers()
+
+    @app.get("/providers/codex/status", response_model=ProviderCliStatus)
+    def codex_status() -> ProviderCliStatus:
+        return provider_service.get_codex_status()
+
+    @app.get("/providers/codex/models", response_model=ProviderModelCatalog)
+    def codex_models(bundled: bool = False) -> ProviderModelCatalog:
+        return provider_service.get_codex_models(bundled=bundled)
+
+    @app.get("/providers/claude/status", response_model=ProviderCliStatus)
+    def claude_status() -> ProviderCliStatus:
+        return provider_service.get_claude_status()
+
+    @app.get("/runtime/health", response_model=RuntimeHealthSnapshot)
+    def runtime_health() -> RuntimeHealthSnapshot:
+        return provider_service.get_runtime_health()
+
+    @app.get("/runtime/usage", response_model=RuntimeUsageSnapshot)
+    def runtime_usage() -> RuntimeUsageSnapshot:
+        return provider_service.get_runtime_usage()
 
     @app.get("/runs", response_model=list[RunSummary])
     def list_runs(limit: Annotated[int, Query(ge=1, le=200)] = 50) -> list[RunSummary]:

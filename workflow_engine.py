@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -122,6 +123,21 @@ class WorkflowEngine:
         logs_dir = create_logs_dir(run_dir)
         plan_artifacts = _load_plan_artifacts(run_dir, state)
         route = _route_from_state(state)
+        manual_graph = _manual_graph_from_state(state)
+        if manual_graph is not None:
+            route = _route_from_manual_graph(manual_graph, route)
+            config = _config_from_manual_graph(config, manual_graph)
+            store.append_event(
+                "graph_execution_started",
+                "system",
+                "Manual workflow graph execution started",
+                {
+                    "stage_count": len(manual_graph.get("stages") or []),
+                    "code_agent_count": route.code_agent_count,
+                    "qa_agent_count": route.qa_agent_count,
+                    "uses_integrator": route.uses_integrator,
+                },
+            )
 
         def register_process(stage: str, agent_id: str, handle: CodexProcessHandle) -> None:
             store.set_active_step(
@@ -135,6 +151,8 @@ class WorkflowEngine:
 
         try:
             if not route.uses_integrator:
+                if manual_graph is not None:
+                    store.append_event("graph_stage_started", "system", "Manual graph code/QA stages started", {"stages": ["code", "qa"]})
                 await self._run_single_code_development_async(
                     run_dir=run_dir,
                     store=store,
@@ -144,8 +162,12 @@ class WorkflowEngine:
                     route=route,
                     register_process=register_process,
                 )
+                if manual_graph is not None:
+                    store.append_event("graph_execution_completed", "system", "Manual workflow graph execution completed", {"status": "awaiting_qa_approval"})
                 return
 
+            if manual_graph is not None:
+                store.append_event("graph_stage_started", "system", "Manual graph contract stage started", {"stage": "contract"})
             store.set_active_step(stage="contract", agent_id="architect", interruptible=True)
             contract_dir = await run_contract_stage_async(
                 run_dir,
@@ -160,6 +182,9 @@ class WorkflowEngine:
                 store.set_status("cancelled")
                 return
 
+            if manual_graph is not None:
+                store.append_event("graph_stage_completed", "system", "Manual graph contract stage completed", {"stage": "contract"})
+                store.append_event("graph_stage_started", "system", "Manual graph scaffold stage started", {"stage": "scaffold"})
             store.set_active_step(stage="scaffold", agent_id="scaffold", interruptible=True)
             scaffold_dir = await run_scaffold_stage_async(
                 run_dir,
@@ -174,6 +199,9 @@ class WorkflowEngine:
                 store.set_status("cancelled")
                 return
 
+            if manual_graph is not None:
+                store.append_event("graph_stage_completed", "system", "Manual graph scaffold stage completed", {"stage": "scaffold"})
+                store.append_event("graph_stage_started", "system", "Manual graph code stage started", {"stage": "code"})
             assignments = await run_code_agents_stage_async(
                 run_dir,
                 logs_dir,
@@ -188,6 +216,9 @@ class WorkflowEngine:
                 store.set_status("cancelled")
                 return
 
+            if manual_graph is not None:
+                store.append_event("graph_stage_completed", "system", "Manual graph code stage completed", {"stage": "code"})
+                store.append_event("graph_stage_started", "system", "Manual graph integration stage started", {"stage": "integration"})
             generated_app_dir = await run_integration_stage_async(
                 run_dir,
                 logs_dir,
@@ -203,6 +234,9 @@ class WorkflowEngine:
                 store.set_status("cancelled")
                 return
 
+            if manual_graph is not None:
+                store.append_event("graph_stage_completed", "system", "Manual graph integration stage completed", {"stage": "integration"})
+                store.append_event("graph_stage_started", "system", "Manual graph QA stage started", {"stage": "qa"})
             store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
             qa_result = await asyncio.to_thread(
                 run_mechanical_qa_stage,
@@ -283,6 +317,8 @@ class WorkflowEngine:
 
             store.clear_control_action()
             store.set_status("awaiting_qa_approval")
+            if manual_graph is not None:
+                store.append_event("graph_execution_completed", "system", "Manual workflow graph execution completed", {"status": "awaiting_qa_approval"})
             store.append_event(
                 "worker_checkpoint",
                 "system",
@@ -481,6 +517,7 @@ def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
         qa_agent_codex_homes=_str_list(homes.get("qa_agents")),
         model=_optional_str(dashboard_config.get("model")),
         reasoning_effort=_optional_str(dashboard_config.get("reasoning_effort")),
+        agent_configs=_agent_configs(dashboard_config.get("agent_configs")),
         max_fix_iterations=_int_value(dashboard_config.get("max_fix_iterations"), 1),
         timeout_seconds=_int_value(dashboard_config.get("timeout_seconds"), 900),
     )
@@ -492,6 +529,82 @@ def _route_from_state(state: dict[str, Any]) -> RoutingDecision:
         return RoutingDecision.from_dict(payload)
     mode = str((state.get("dashboard_config") or {}).get("routing_mode") or "balanced")
     return RoutingDecision.from_dict({"requested_mode": mode, "mode": "balanced"})
+
+
+def _manual_graph_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
+    workflow = state.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    graph = workflow.get("graph")
+    if isinstance(graph, dict) and workflow.get("mode") == "manual":
+        return graph
+    return None
+
+
+def _route_from_manual_graph(graph: dict[str, Any], fallback: RoutingDecision) -> RoutingDecision:
+    stages = _graph_stages(graph)
+    code_agents = _stage_agents(stages, "code")
+    qa_agents = [agent for agent in _stage_agents(stages, "qa") if agent != "mechanical_qa"]
+    uses_integrator = any(stage.get("type") == "integration" for stage in stages)
+    uses_contract = uses_integrator or any(stage.get("type") == "contract" for stage in stages)
+    uses_scaffold = uses_integrator or any(stage.get("type") == "scaffold" for stage in stages)
+    code_count = max(1, len(code_agents) or fallback.code_agent_count)
+    qa_count = max(0, len(qa_agents))
+    mode = "parallel" if uses_integrator or code_count > 1 else "balanced"
+    pipeline = ["manual_graph", "code_agents" if code_count > 1 else "code_1", "mechanical_qa"]
+    if uses_integrator:
+        pipeline = ["manual_graph", "architect_contract", "scaffold", "code_agents", "integrator", "mechanical_qa"]
+    if qa_count:
+        pipeline.append("qa_agent")
+    return RoutingDecision(
+        requested_mode="manual",
+        mode=mode,
+        reason="Manual workflow graph execution.",
+        planner_count=max(1, len(_stage_agents(stages, "planning")) or fallback.planner_count),
+        code_agent_count=code_count,
+        qa_agent_count=qa_count,
+        pipeline=pipeline,
+        uses_contract=uses_contract,
+        uses_scaffold=uses_scaffold,
+        uses_integrator=uses_integrator,
+        uses_llm_qa=qa_count > 0,
+    )
+
+
+def _config_from_manual_graph(config: LocalRunConfig, graph: dict[str, Any]) -> LocalRunConfig:
+    stages = _graph_stages(graph)
+    code_count = max(1, len(_stage_agents(stages, "code")) or config.code_agent_count)
+    qa_count = max(0, len([agent for agent in _stage_agents(stages, "qa") if agent != "mechanical_qa"]))
+    return replace(
+        config,
+        code_agent_count=code_count,
+        qa_agent_count=qa_count,
+        code_agent_codex_homes=_pad_list(config.code_agent_codex_homes, code_count),
+        qa_agent_codex_homes=_pad_list(config.qa_agent_codex_homes, qa_count),
+    )
+
+
+def _graph_stages(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    stages = graph.get("stages")
+    return [stage for stage in stages if isinstance(stage, dict)] if isinstance(stages, list) else []
+
+
+def _stage_agents(stages: list[dict[str, Any]], stage_type: str) -> list[str]:
+    agents: list[str] = []
+    for stage in stages:
+        if stage.get("type") != stage_type:
+            continue
+        raw_agents = stage.get("agents")
+        if isinstance(raw_agents, list):
+            agents.extend(str(agent) for agent in raw_agents if agent)
+    return agents
+
+
+def _pad_list(values: list[str | None], count: int) -> list[str | None]:
+    padded = list(values[:count])
+    while len(padded) < count:
+        padded.append(None)
+    return padded
 
 
 def workflow_from_route(route: RoutingDecision) -> dict[str, Any]:
@@ -623,3 +736,13 @@ def _str_list(value: Any) -> list[str | None]:
     if not isinstance(value, list):
         return []
     return [str(item) if item else None for item in value]
+
+
+def _agent_configs(value: Any) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for agent_id, config in value.items():
+        if isinstance(agent_id, str) and isinstance(config, dict):
+            result[agent_id] = dict(config)
+    return result

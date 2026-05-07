@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import time
 import tempfile
 import unittest
@@ -12,13 +13,18 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app_services import (
+    AgentProviderConfig,
     ArtifactService,
     ConfigService,
     EventService,
+    LocalAppSettings,
     ObservationService,
     OperatorActionRequest,
+    ProviderService,
     RunCreateRequest,
     RunService,
+    SettingsService,
+    WorkflowGraph,
     LOCAL_ENV_KEYS,
 )
 from run_worker import RunWorker
@@ -66,6 +72,123 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(detail.state["workflow"]["resolved_mode"], "balanced")
         self.assertEqual(detail.state["active_step"]["stage"], None)
         self.assertTrue((created_dir / "route.json").exists())
+
+    def test_create_run_records_selected_provider_defaults(self) -> None:
+        service = RunService(self.project_root)
+        codex_home = str(self.project_root / "account_1")
+        detail = service.create_run(
+            RunCreateRequest(
+                user_request="Build an app",
+                routing_mode="fast",
+                code_agent_count=1,
+                qa_agent_count=1,
+                model="gpt-5.5",
+                reasoning_effort="high",
+                planner_a_codex_home=codex_home,
+                planner_b_codex_home=codex_home,
+                code_agent_codex_homes=[codex_home],
+                qa_agent_codex_homes=[codex_home],
+                agent_configs=[
+                    AgentProviderConfig(
+                        agent_id="planner_a",
+                        account="account_1",
+                        codex_home=codex_home,
+                        model="gpt-5.4",
+                        reasoning_effort="xhigh",
+                    )
+                ],
+            )
+        )
+
+        dashboard_config = detail.state["dashboard_config"]
+        self.assertEqual(dashboard_config["model"], "gpt-5.5")
+        self.assertEqual(dashboard_config["reasoning_effort"], "high")
+        self.assertEqual(dashboard_config["codex_homes"]["planner_a"], codex_home)
+        self.assertEqual(dashboard_config["codex_homes"]["planner_b"], codex_home)
+        self.assertEqual(dashboard_config["codex_homes"]["code_agents"], [codex_home])
+        self.assertEqual(dashboard_config["codex_homes"]["qa_agents"], [codex_home])
+        self.assertEqual(dashboard_config["agent_configs"]["planner_a"]["model"], "gpt-5.4")
+        self.assertEqual(dashboard_config["agent_configs"]["planner_a"]["reasoning_effort"], "xhigh")
+
+    def test_settings_service_round_trips_agent_configs(self) -> None:
+        service = SettingsService(self.project_root)
+        saved = service.save_settings(
+            LocalAppSettings(
+                default_account="account_1",
+                default_codex_home=str(self.project_root / "account_1"),
+                default_model="gpt-5.5",
+                default_reasoning_effort="high",
+                agent_configs=[
+                    AgentProviderConfig(
+                        agent_id="code_1",
+                        account="account_2",
+                        codex_home=str(self.project_root / "account_2"),
+                        model="gpt-5.4",
+                        reasoning_effort="medium",
+                    )
+                ],
+            )
+        )
+        loaded = service.get_settings()
+
+        self.assertTrue((self.project_root / "local_app_settings.json").exists())
+        self.assertEqual(saved.default_model, "gpt-5.5")
+        self.assertEqual(loaded.default_account, "account_1")
+        self.assertEqual(loaded.agent_configs[0].agent_id, "code_1")
+        self.assertEqual(loaded.agent_configs[0].model, "gpt-5.4")
+
+    def test_manual_workflow_graph_is_saved_in_run_state(self) -> None:
+        service = RunService(self.project_root)
+        graph = WorkflowGraph(
+            stages=[
+                {"id": "planning", "type": "planning", "agents": ["planner_a"]},
+                {"id": "approval_plan", "type": "approval", "after": ["planning"]},
+                {"id": "code", "type": "code", "agents": ["code_1"], "after": ["approval_plan"]},
+                {"id": "qa", "type": "qa", "agents": ["mechanical_qa"], "after": ["code"]},
+                {"id": "approval_qa", "type": "approval", "after": ["qa"]},
+            ]
+        )
+        detail = service.create_run(
+            RunCreateRequest(user_request="Build an app", routing_mode="manual", workflow_graph=graph)
+        )
+
+        self.assertEqual(detail.state["workflow"]["mode"], "manual")
+        self.assertEqual(detail.state["workflow"]["graph"]["stages"][2]["id"], "code")
+        self.assertTrue((Path(detail.run_dir) / "workflow_graph.json").exists())
+
+    def test_manual_workflow_graph_rejects_invalid_parallel_code_without_integrator(self) -> None:
+        with self.assertRaises(ValidationError):
+            RunCreateRequest(
+                user_request="Build an app",
+                routing_mode="manual",
+                workflow_graph={
+                    "stages": [
+                        {"id": "planning", "type": "planning", "agents": ["planner_a"]},
+                        {"id": "approval_plan", "type": "approval", "after": ["planning"]},
+                        {
+                            "id": "code",
+                            "type": "code",
+                            "agents": ["code_1", "code_2"],
+                            "after": ["approval_plan"],
+                            "parallel": True,
+                        },
+                        {"id": "qa", "type": "qa", "agents": ["mechanical_qa"], "after": ["code"]},
+                    ]
+                },
+            )
+
+    def test_workflow_graph_is_manual_only(self) -> None:
+        with self.assertRaises(ValidationError):
+            RunCreateRequest(
+                user_request="Build an app",
+                routing_mode="balanced",
+                workflow_graph={
+                    "stages": [
+                        {"id": "planning", "type": "planning", "agents": ["planner_a"]},
+                        {"id": "code", "type": "code", "agents": ["code_1"], "after": ["planning"]},
+                    ]
+                },
+            )
 
     def test_actions_append_approval_history_and_events(self) -> None:
         service = RunService(self.project_root)
@@ -219,6 +342,86 @@ class AppServiceTests(unittest.TestCase):
                     os.environ[key] = value
                 else:
                     os.environ.pop(key, None)
+
+    def test_provider_service_parses_codex_model_catalog(self) -> None:
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.4",
+                    "display_name": "gpt-5.4",
+                    "description": "Strong model",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Fast"},
+                        {"effort": "high", "description": "Deep"},
+                    ],
+                    "visibility": "list",
+                    "supported_in_api": True,
+                }
+            ]
+        }
+
+        def fake_run(command, **_kwargs):
+            self.assertIn("debug", command)
+            return subprocess.CompletedProcess(command, 0, json.dumps(catalog), "")
+
+        with patch("app_services.shutil.which", return_value="codex"), patch("app_services.subprocess.run", side_effect=fake_run):
+            result = ProviderService(self.project_root).get_codex_models()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.models[0].id, "gpt-5.4")
+        self.assertEqual(result.models[0].default_reasoning_level, "medium")
+        self.assertEqual([level.effort for level in result.models[0].supported_reasoning_levels], ["low", "high"])
+
+    def test_provider_service_reports_codex_login_status(self) -> None:
+        def fake_run(command, **_kwargs):
+            if "--version" in command:
+                return subprocess.CompletedProcess(command, 0, "codex-cli 0.124.0\n", "")
+            if "status" in command:
+                return subprocess.CompletedProcess(command, 0, "Logged in using ChatGPT\n", "")
+            return subprocess.CompletedProcess(command, 1, "", "unexpected")
+
+        with patch("app_services.shutil.which", return_value="codex"), patch("app_services.subprocess.run", side_effect=fake_run):
+            status = ProviderService(self.project_root).get_codex_status()
+
+        self.assertTrue(status.installed)
+        self.assertTrue(status.logged_in)
+        self.assertEqual(status.version, "codex-cli 0.124.0")
+        self.assertEqual(status.status, "ready")
+
+    def test_provider_service_handles_missing_claude(self) -> None:
+        with patch("app_services.shutil.which", return_value=None):
+            status = ProviderService(self.project_root).get_claude_status()
+
+        self.assertFalse(status.installed)
+        self.assertEqual(status.status, "missing")
+
+    def test_provider_service_reads_codex_rate_limits(self) -> None:
+        payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 41, "windowDurationMins": 300, "resetsAt": 1778057248},
+                "secondary": {"usedPercent": 67, "windowDurationMins": 10080, "resetsAt": 1778044493},
+                "planType": "plus",
+                "rateLimitReachedType": None,
+            }
+        }
+
+        with patch("app_services.shutil.which", return_value="codex"), patch(
+            "app_services._codex_app_server_request", return_value=payload
+        ):
+            usage = ProviderService(self.project_root).get_runtime_usage()
+
+        self.assertTrue(usage.ok)
+        self.assertEqual(usage.source, "codex app-server account/rateLimits/read")
+        self.assertEqual(usage.message, "plan: plus")
+        self.assertEqual(usage.limits[0].name, "5h limit")
+        self.assertEqual(usage.limits[0].used_percent, 41)
+        self.assertEqual(usage.limits[0].remaining_percent, 59)
+        self.assertEqual(usage.limits[0].window_duration_mins, 300)
+        self.assertEqual(usage.limits[1].name, "weekly limit")
+        self.assertEqual(usage.limits[1].used_percent, 67)
+        self.assertEqual(usage.limits[1].remaining_percent, 33)
 
 
 class FakeWorkflowEngine:
@@ -672,6 +875,63 @@ class WorkflowEngineAsyncDevelopmentTests(unittest.IsolatedAsyncioTestCase):
         state = StateStore(self.run_dir).load()
         self.assertEqual(state["status"], "awaiting_qa_approval")
         self.assertEqual(state["artifacts"]["generated_app"], "generated_app")
+
+    async def test_run_development_async_uses_manual_graph_over_stored_route(self) -> None:
+        store = StateStore(self.run_dir)
+        state = store.load()
+        state["workflow"] = {
+            "mode": "manual",
+            "resolved_mode": "manual",
+            "graph": {
+                "mode": "manual",
+                "stages": [
+                    {"id": "planning", "type": "planning", "agents": ["planner_a"], "parallel": False},
+                    {"id": "approval_plan", "type": "approval", "after": ["planning"]},
+                    {"id": "code", "type": "code", "agents": ["code_1"], "after": ["approval_plan"], "parallel": False},
+                    {"id": "qa", "type": "qa", "agents": ["mechanical_qa"], "after": ["code"], "parallel": False},
+                    {"id": "approval_qa", "type": "approval", "after": ["qa"]},
+                ],
+            },
+        }
+        store.save(state)
+
+        async def fake_single_code_stage(run_dir, logs_dir, store, config, final_plan, route, **kwargs):
+            self.assertEqual(route.requested_mode, "manual")
+            self.assertEqual(route.code_agent_count, 1)
+            self.assertEqual(config.code_agent_count, 1)
+            generated_app_dir = run_dir / "generated_app"
+            generated_app_dir.mkdir(parents=True, exist_ok=True)
+            store.record_artifact("generated_app", generated_app_dir)
+            return generated_app_dir, object(), None
+
+        async def forbidden_contract_stage(*args, **kwargs):
+            raise AssertionError("single-code manual graph should not run contract stage")
+
+        def fake_mechanical_qa_stage(run_dir, store, generated_app_dir, **kwargs):
+            report_path = run_dir / "qa_report.md"
+            report_path.write_text("# QA\n", encoding="utf-8")
+            return QAResult(
+                ok=True,
+                checked_files=[],
+                error_log="",
+                report_path=report_path,
+                report_markdown="# QA\n",
+                executable_status="PASS",
+                executable_app_type="manifest",
+            )
+
+        with (
+            patch("workflow_engine.run_single_code_stage_async", side_effect=fake_single_code_stage),
+            patch("workflow_engine.run_contract_stage_async", side_effect=forbidden_contract_stage),
+            patch("workflow_engine.run_mechanical_qa_stage", side_effect=fake_mechanical_qa_stage),
+        ):
+            await WorkflowEngine(self.project_root).run_development_async("20260504_120000")
+
+        state = StateStore(self.run_dir).load()
+        self.assertEqual(state["status"], "awaiting_qa_approval")
+        event_text = (self.run_dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn("graph_execution_started", event_text)
+        self.assertIn("graph_execution_completed", event_text)
 
     async def test_run_development_async_runs_fix_loop_after_qa_failure(self) -> None:
         async def fake_contract_stage(run_dir, logs_dir, store, config, plan_artifacts, **kwargs):

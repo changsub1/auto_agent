@@ -24,6 +24,101 @@ export type AppConfig = {
   }>;
 };
 
+export type ProviderCliStatus = {
+  provider: string;
+  installed: boolean;
+  executable?: string | null;
+  version?: string | null;
+  logged_in?: boolean | null;
+  account?: string | null;
+  plan?: string | null;
+  status: string;
+  detail: string;
+};
+
+export type ProviderReasoningLevel = {
+  effort: string;
+  description: string;
+};
+
+export type ProviderModelInfo = {
+  id: string;
+  display_name: string;
+  description: string;
+  default_reasoning_level?: string | null;
+  supported_reasoning_levels: ProviderReasoningLevel[];
+  visibility?: string | null;
+  supported_in_api?: boolean | null;
+};
+
+export type ProviderModelCatalog = {
+  provider: string;
+  ok: boolean;
+  source: string;
+  models: ProviderModelInfo[];
+  error: string;
+};
+
+export type UsageLimitInfo = {
+  name: string;
+  available: boolean;
+  used_percent?: number | null;
+  remaining_percent?: number | null;
+  reset_at?: string | null;
+  reset_at_epoch?: number | null;
+  window_duration_mins?: number | null;
+  raw: string;
+};
+
+export type RuntimeUsageSnapshot = {
+  provider: string;
+  source: string;
+  ok: boolean;
+  limits: UsageLimitInfo[];
+  message: string;
+};
+
+export type RuntimeHealthSnapshot = {
+  status: string;
+  codex: ProviderCliStatus;
+  claude: ProviderCliStatus;
+  discord_token_configured: boolean;
+  executable_qa_enabled: boolean;
+  codex_child_windows_sandbox?: string | null;
+};
+
+export type AgentProviderConfig = {
+  agent_id: string;
+  provider?: string;
+  account?: string | null;
+  codex_home?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  enabled?: boolean;
+};
+
+export type LocalAppSettings = {
+  default_provider?: string;
+  default_account?: string | null;
+  default_codex_home?: string | null;
+  default_model?: string | null;
+  default_reasoning_effort?: string | null;
+  agent_configs: AgentProviderConfig[];
+};
+
+export type WorkflowStage = {
+  id: string;
+  type: "planning" | "approval" | "contract" | "scaffold" | "code" | "integration" | "qa" | "fix";
+  agents?: string[];
+  after?: string[];
+  parallel?: boolean;
+};
+
+export type WorkflowGraph = {
+  mode: "manual";
+  stages: WorkflowStage[];
+};
+
 export type RunSummary = {
   run_id: string;
   status: string;
@@ -156,6 +251,16 @@ export type CreateRunInput = {
   reasoning_effort?: string | null;
   timeout_seconds?: number;
   max_fix_iterations?: number;
+  planner_a_codex_home?: string | null;
+  planner_b_codex_home?: string | null;
+  planner_c_codex_home?: string | null;
+  architect_codex_home?: string | null;
+  scaffold_codex_home?: string | null;
+  integrator_codex_home?: string | null;
+  code_agent_codex_homes?: Array<string | null>;
+  qa_agent_codex_homes?: Array<string | null>;
+  agent_configs?: AgentProviderConfig[];
+  workflow_graph?: WorkflowGraph | null;
 };
 
 declare global {
@@ -208,6 +313,37 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function loadConfig(): Promise<AppConfig> {
   return apiFetch<AppConfig>("/config");
+}
+
+export function listProviders(): Promise<ProviderCliStatus[]> {
+  return apiFetch<ProviderCliStatus[]>("/providers");
+}
+
+export function getCodexStatus(): Promise<ProviderCliStatus> {
+  return apiFetch<ProviderCliStatus>("/providers/codex/status");
+}
+
+export function getCodexModels(bundled = false): Promise<ProviderModelCatalog> {
+  return apiFetch<ProviderModelCatalog>(`/providers/codex/models?bundled=${bundled ? "true" : "false"}`);
+}
+
+export function getRuntimeHealth(): Promise<RuntimeHealthSnapshot> {
+  return apiFetch<RuntimeHealthSnapshot>("/runtime/health");
+}
+
+export function getRuntimeUsage(): Promise<RuntimeUsageSnapshot> {
+  return apiFetch<RuntimeUsageSnapshot>("/runtime/usage");
+}
+
+export function loadSettings(): Promise<LocalAppSettings> {
+  return apiFetch<LocalAppSettings>("/settings");
+}
+
+export function saveSettings(settings: LocalAppSettings): Promise<LocalAppSettings> {
+  return apiFetch<LocalAppSettings>("/settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
 }
 
 export function listRuns(limit = 25): Promise<RunSummary[]> {

@@ -12,11 +12,15 @@ import base64
 import json
 import mimetypes
 import os
+import queue
+import shutil
+import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 try:
     import tomllib
@@ -34,6 +38,7 @@ from workspace_manager import create_logs_dir, create_run_dir
 
 ArtifactKind = Literal["file", "image", "log", "directory", "unknown"]
 DashboardMode = Literal["planning_only", "contract_only", "scaffold_only"]
+WorkflowStageType = Literal["planning", "approval", "contract", "scaffold", "code", "integration", "qa", "fix"]
 LOCAL_ENV_KEYS = {
     "CODEX_HOME",
     "PLANNER_A_CODEX_HOME",
@@ -60,6 +65,45 @@ LOCAL_ENV_KEYS = {
 }
 
 
+class WorkflowStage(BaseModel):
+    id: str
+    type: WorkflowStageType
+    agents: list[str] = Field(default_factory=list)
+    after: list[str] = Field(default_factory=list)
+    parallel: bool = False
+
+    @field_validator("id")
+    @classmethod
+    def _strip_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("stage id is required")
+        return stripped
+
+    @field_validator("agents", "after")
+    @classmethod
+    def _strip_values(cls, values: list[str]) -> list[str]:
+        return [item.strip() for item in values if item and item.strip()]
+
+
+class WorkflowGraph(BaseModel):
+    mode: str = "manual"
+    stages: list[WorkflowStage] = Field(default_factory=list)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode != "manual":
+            raise ValueError("workflow_graph.mode must be manual")
+        return mode
+
+    @model_validator(mode="after")
+    def _validate_graph(self) -> "WorkflowGraph":
+        _validate_workflow_graph(self)
+        return self
+
+
 class RunCreateRequest(BaseModel):
     """Request body for creating a local run from the app/API."""
 
@@ -81,6 +125,8 @@ class RunCreateRequest(BaseModel):
     integrator_codex_home: str | None = None
     code_agent_codex_homes: list[str | None] | None = None
     qa_agent_codex_homes: list[str | None] | None = None
+    agent_configs: list["AgentProviderConfig"] = Field(default_factory=list)
+    workflow_graph: WorkflowGraph | None = None
 
     @field_validator("user_request")
     @classmethod
@@ -104,6 +150,57 @@ class RunCreateRequest(BaseModel):
             allowed = ", ".join(REASONING_EFFORTS)
             raise ValueError(f"reasoning_effort must be one of: {allowed}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_workflow_graph_mode(self) -> "RunCreateRequest":
+        if self.workflow_graph is not None and self.routing_mode != "manual":
+            raise ValueError("workflow_graph is only supported when routing_mode is manual")
+        return self
+
+
+class AgentProviderConfig(BaseModel):
+    agent_id: str
+    provider: str = "codex"
+    account: str | None = None
+    codex_home: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    enabled: bool = True
+
+    @field_validator("agent_id")
+    @classmethod
+    def _strip_agent_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("agent_id is required")
+        return stripped
+
+    @field_validator("provider")
+    @classmethod
+    def _normalize_provider(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in {"codex", "local", "manual"}:
+            raise ValueError(f"unsupported provider for execution: {value}")
+        return provider
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _validate_agent_reasoning(cls, value: str | None) -> str | None:
+        if value in {None, ""}:
+            return None
+        if value not in REASONING_EFFORTS:
+            allowed = ", ".join(REASONING_EFFORTS)
+            raise ValueError(f"reasoning_effort must be one of: {allowed}")
+        return value
+
+
+class LocalAppSettings(BaseModel):
+    default_provider: str = "codex"
+    default_account: str | None = None
+    default_codex_home: str | None = None
+    default_model: str | None = None
+    default_reasoning_effort: str | None = None
+    agent_configs: list[AgentProviderConfig] = Field(default_factory=list)
 
 
 class OperatorActionRequest(BaseModel):
@@ -219,6 +316,69 @@ class ConfigSnapshot(BaseModel):
     reference_profiles: dict[str, str]
     defaults: dict[str, Any]
     providers: list[dict[str, Any]]
+
+
+class ProviderCliStatus(BaseModel):
+    provider: str
+    installed: bool
+    executable: str | None = None
+    version: str | None = None
+    logged_in: bool | None = None
+    account: str | None = None
+    plan: str | None = None
+    status: str = "unknown"
+    detail: str = ""
+
+
+class ProviderReasoningLevel(BaseModel):
+    effort: str
+    description: str = ""
+
+
+class ProviderModelInfo(BaseModel):
+    id: str
+    display_name: str
+    description: str = ""
+    default_reasoning_level: str | None = None
+    supported_reasoning_levels: list[ProviderReasoningLevel] = Field(default_factory=list)
+    visibility: str | None = None
+    supported_in_api: bool | None = None
+
+
+class ProviderModelCatalog(BaseModel):
+    provider: str
+    ok: bool
+    source: str
+    models: list[ProviderModelInfo] = Field(default_factory=list)
+    error: str = ""
+
+
+class UsageLimitInfo(BaseModel):
+    name: str
+    available: bool = False
+    used_percent: int | None = None
+    remaining_percent: int | None = None
+    reset_at: str | None = None
+    reset_at_epoch: int | None = None
+    window_duration_mins: int | None = None
+    raw: str = ""
+
+
+class RuntimeUsageSnapshot(BaseModel):
+    provider: str
+    source: str
+    ok: bool
+    limits: list[UsageLimitInfo] = Field(default_factory=list)
+    message: str = ""
+
+
+class RuntimeHealthSnapshot(BaseModel):
+    status: str
+    codex: ProviderCliStatus
+    claude: ProviderCliStatus
+    discord_token_configured: bool
+    executable_qa_enabled: bool
+    codex_child_windows_sandbox: str | None = None
 
 
 class ConfigService:
@@ -395,6 +555,168 @@ class ConfigService:
         return default_profile if isinstance(default_profile, dict) else {}
 
 
+class SettingsService:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        self.settings_path = self.project_root / "local_app_settings.json"
+
+    def get_settings(self) -> LocalAppSettings:
+        if not self.settings_path.exists():
+            return LocalAppSettings()
+        try:
+            payload = _read_json(self.settings_path)
+        except (OSError, json.JSONDecodeError):
+            return LocalAppSettings()
+        if not isinstance(payload, dict):
+            return LocalAppSettings()
+        return LocalAppSettings(**payload)
+
+    def save_settings(self, settings: LocalAppSettings) -> LocalAppSettings:
+        self.settings_path.write_text(_json_text(settings.model_dump()), encoding="utf-8")
+        return self.get_settings()
+
+
+class ProviderService:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        load_local_app_env(self.project_root)
+
+    def list_providers(self) -> list[ProviderCliStatus]:
+        return [self.get_codex_status(), self.get_claude_status()]
+
+    def get_codex_status(self) -> ProviderCliStatus:
+        executable = _find_cli("codex")
+        if not executable:
+            return ProviderCliStatus(
+                provider="codex",
+                installed=False,
+                status="missing",
+                detail="Codex CLI was not found on PATH.",
+            )
+        version = _run_cli_text(executable, ["--version"], timeout=10)
+        login = _run_cli_text(executable, ["login", "status"], timeout=15)
+        login_text = f"{login.stdout}\n{login.stderr}"
+        logged_in = login.returncode == 0 and "logged in" in login_text.lower()
+        return ProviderCliStatus(
+            provider="codex",
+            installed=True,
+            executable=executable,
+            version=_first_line(version.stdout) if version.returncode == 0 else None,
+            logged_in=logged_in,
+            status="ready" if logged_in else "login_required",
+            detail=_first_line(login_text),
+        )
+
+    def get_claude_status(self) -> ProviderCliStatus:
+        executable = _find_cli("claude")
+        if not executable:
+            return ProviderCliStatus(
+                provider="claude",
+                installed=False,
+                status="missing",
+                detail="Claude Code CLI was not found on PATH.",
+            )
+        version = _run_cli_text(executable, ["--version"], timeout=10)
+        return ProviderCliStatus(
+            provider="claude",
+            installed=True,
+            executable=executable,
+            version=_first_line(version.stdout) if version.returncode == 0 else None,
+            logged_in=None,
+            status="detected",
+            detail=_first_line(version.stdout or version.stderr),
+        )
+
+    def get_codex_models(self, *, bundled: bool = False) -> ProviderModelCatalog:
+        executable = _find_cli("codex")
+        if not executable:
+            return ProviderModelCatalog(provider="codex", ok=False, source="missing", error="Codex CLI was not found.")
+        args = ["debug", "models"]
+        if bundled:
+            args.append("--bundled")
+        result = _run_cli_text(executable, args, timeout=30)
+        source = "codex debug models --bundled" if bundled else "codex debug models"
+        if result.returncode != 0:
+            if not bundled:
+                fallback = self.get_codex_models(bundled=True)
+                if fallback.ok:
+                    return fallback
+            return ProviderModelCatalog(
+                provider="codex",
+                ok=False,
+                source=source,
+                error=_compact_text(result.stderr or result.stdout or "Codex model catalog command failed.", max_chars=1000),
+            )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return ProviderModelCatalog(provider="codex", ok=False, source=source, error=f"Invalid model catalog JSON: {exc}")
+        return ProviderModelCatalog(
+            provider="codex",
+            ok=True,
+            source=source,
+            models=_parse_codex_models(payload),
+        )
+
+    def get_runtime_usage(self) -> RuntimeUsageSnapshot:
+        executable = _find_cli("codex")
+        if not executable:
+            return RuntimeUsageSnapshot(
+                provider="codex",
+                source="codex app-server account/rateLimits/read",
+                ok=False,
+                limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
+                message="Codex CLI was not found on PATH.",
+            )
+        try:
+            payload = _codex_app_server_request(
+                executable,
+                "account/rateLimits/read",
+                cwd=self.project_root,
+                timeout=25,
+            )
+        except RuntimeError as exc:
+            return RuntimeUsageSnapshot(
+                provider="codex",
+                source="codex app-server account/rateLimits/read",
+                ok=False,
+                limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
+                message=str(exc),
+            )
+        rate_limits = payload.get("rateLimits")
+        if not isinstance(rate_limits, dict):
+            return RuntimeUsageSnapshot(
+                provider="codex",
+                source="codex app-server account/rateLimits/read",
+                ok=False,
+                limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
+                message="Codex app-server returned no rateLimits payload.",
+            )
+        return RuntimeUsageSnapshot(
+            provider="codex",
+            source="codex app-server account/rateLimits/read",
+            ok=True,
+            limits=[
+                _usage_limit_from_window("5h limit", rate_limits.get("primary")),
+                _usage_limit_from_window("weekly limit", rate_limits.get("secondary")),
+            ],
+            message=_codex_usage_message(rate_limits),
+        )
+
+    def get_runtime_health(self) -> RuntimeHealthSnapshot:
+        codex = self.get_codex_status()
+        claude = self.get_claude_status()
+        status = "ready" if codex.installed and codex.logged_in else "setup_required"
+        return RuntimeHealthSnapshot(
+            status=status,
+            codex=codex,
+            claude=claude,
+            discord_token_configured=bool(os.environ.get("DISCORD_BOT_TOKEN", "").strip()),
+            executable_qa_enabled=_env_bool("EXECUTABLE_QA_ENABLED", default=True),
+            codex_child_windows_sandbox=_optional_str(os.environ.get("CODEX_CHILD_WINDOWS_SANDBOX")),
+        )
+
+
 class RunService:
     def __init__(self, project_root: Path, worker: RunWorker | None = None) -> None:
         self.project_root = Path(project_root)
@@ -440,6 +762,8 @@ class RunService:
             max_qa_agent_count=config.qa_agent_count,
         )
         self._record_route(store, route)
+        if request.workflow_graph is not None:
+            self._record_workflow_graph(store, request.workflow_graph)
         store.set_status("planning_queued")
         return self.get_run(run_dir.name)
 
@@ -551,6 +875,7 @@ class RunService:
             qa_agent_codex_homes=_expand_list(request.qa_agent_codex_homes, defaults.qa_agent_codex_homes, qa_count),
             model=request.model if request.model is not None else defaults.model,
             reasoning_effort=request.reasoning_effort if request.reasoning_effort is not None else defaults.reasoning_effort,
+            agent_configs=_agent_config_map(request.agent_configs or []),
             max_fix_iterations=(
                 request.max_fix_iterations if request.max_fix_iterations is not None else defaults.max_fix_iterations
             ),
@@ -569,6 +894,23 @@ class RunService:
         store.set_workflow(workflow_from_route(route))
         route_path = store.write_artifact("route.json", _json_text(payload), artifact_name="route")
         store.append_event("routing_decision", "system", f"Selected {route.mode} route", {"path": store.to_relative(route_path), **payload})
+
+    def _record_workflow_graph(self, store: StateStore, graph: WorkflowGraph) -> None:
+        payload = graph.model_dump()
+        workflow = {
+            "mode": "manual",
+            "resolved_mode": "manual",
+            "graph": payload,
+            "stages": payload["stages"],
+        }
+        store.set_workflow(workflow)
+        graph_path = store.write_artifact("workflow_graph.json", _json_text(payload), artifact_name="workflow_graph")
+        store.append_event(
+            "workflow_graph_saved",
+            "system",
+            "Manual workflow graph saved",
+            {"path": store.to_relative(graph_path), **workflow},
+        )
 
     def _record_local_config(self, store: StateStore, config: LocalRunConfig) -> None:
         payload = {
@@ -591,6 +933,7 @@ class RunService:
                 "code_agents": config.code_agent_codex_homes,
                 "qa_agents": config.qa_agent_codex_homes,
             },
+            "agent_configs": config.agent_configs,
         }
         state = store.load()
         state["dashboard_config"] = payload
@@ -952,6 +1295,77 @@ def _expand_list(values: list[str | None] | None, defaults: list[str | None], co
     return [source[index % len(source)] for index in range(count)]
 
 
+def _agent_config_map(configs: list[AgentProviderConfig]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for config in configs:
+        result[config.agent_id] = config.model_dump()
+    return result
+
+
+def _validate_workflow_graph(graph: WorkflowGraph) -> None:
+    if not graph.stages:
+        raise ValueError("workflow_graph.stages must contain at least one stage")
+    stage_ids = [stage.id for stage in graph.stages]
+    duplicates = sorted({stage_id for stage_id in stage_ids if stage_ids.count(stage_id) > 1})
+    if duplicates:
+        raise ValueError(f"workflow_graph has duplicate stage ids: {', '.join(duplicates)}")
+
+    known_ids = set(stage_ids)
+    stage_types = {stage.type for stage in graph.stages}
+    if "planning" not in stage_types:
+        raise ValueError("workflow_graph requires a planning stage")
+    if "code" not in stage_types:
+        raise ValueError("workflow_graph requires a code stage")
+    for stage in graph.stages:
+        missing = [dependency for dependency in stage.after if dependency not in known_ids]
+        if missing:
+            raise ValueError(f"stage {stage.id} references missing dependencies: {', '.join(missing)}")
+        if stage.type == "approval" and stage.parallel:
+            raise ValueError(f"approval stage {stage.id} cannot be parallel")
+        if stage.type != "approval" and not stage.agents:
+            raise ValueError(f"stage {stage.id} requires at least one agent")
+
+    _ensure_graph_has_no_cycles(graph.stages)
+    _validate_integration_rules(graph.stages)
+
+
+def _ensure_graph_has_no_cycles(stages: list[WorkflowStage]) -> None:
+    by_id = {stage.id: stage for stage in stages}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(stage_id: str) -> None:
+        if stage_id in visited:
+            return
+        if stage_id in visiting:
+            raise ValueError(f"workflow_graph contains a cycle at stage {stage_id}")
+        visiting.add(stage_id)
+        for dependency in by_id[stage_id].after:
+            visit(dependency)
+        visiting.remove(stage_id)
+        visited.add(stage_id)
+
+    for stage in stages:
+        visit(stage.id)
+
+
+def _validate_integration_rules(stages: list[WorkflowStage]) -> None:
+    code_stages = [stage for stage in stages if stage.type == "code"]
+    integration_stages = [stage for stage in stages if stage.type == "integration"]
+    code_ids = {stage.id for stage in code_stages}
+    for stage in integration_stages:
+        if not code_ids:
+            raise ValueError(f"integration stage {stage.id} requires a code stage")
+        if stage.after and not any(dependency in code_ids for dependency in stage.after):
+            raise ValueError(f"integration stage {stage.id} must depend on a code stage")
+
+    for stage in code_stages:
+        if stage.parallel and len(stage.agents) > 1:
+            has_integration = any(stage.id in integration.after for integration in integration_stages)
+            if not has_integration:
+                raise ValueError(f"parallel code stage {stage.id} requires an integration stage")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1035,6 +1449,221 @@ def _first_str(*values: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _find_cli(name: str) -> str | None:
+    return shutil.which(name)
+
+
+def _run_cli_text(executable: str, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    command = _cli_command(executable, args)
+    try:
+        return subprocess.run(
+            command,
+            cwd=None,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(command, 1, "", str(exc))
+
+
+def _cli_command(executable: str, args: list[str]) -> list[str]:
+    path = Path(executable)
+    if os.name == "nt" and path.suffix.lower() == ".ps1":
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, *args]
+    return [executable, *args]
+
+
+def _codex_app_server_request(executable: str, method: str, *, cwd: Path, timeout: int) -> dict[str, Any]:
+    command = _cli_command(executable, ["app-server", "--listen", "stdio://"])
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Failed to start Codex app-server: {exc}") from exc
+
+    stdout_queue: queue.Queue[str] = queue.Queue()
+    stderr_lines: list[str] = []
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            stdout_queue.put(line)
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            if len(stderr_lines) < 20:
+                stderr_lines.append(line.strip())
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        _write_app_server_message(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {"name": "orchestra-local-api", "version": "0.0.0"},
+                    "capabilities": None,
+                },
+            },
+        )
+        _wait_app_server_response(stdout_queue, request_id=1, timeout=timeout)
+        _write_app_server_message(process, {"jsonrpc": "2.0", "id": 2, "method": method})
+        return _wait_app_server_response(stdout_queue, request_id=2, timeout=timeout)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
+def _write_app_server_message(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+    if process.stdin is None:
+        raise RuntimeError("Codex app-server stdin is not available.")
+    try:
+        process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+        process.stdin.flush()
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write Codex app-server request: {exc}") from exc
+
+
+def _wait_app_server_response(stdout_queue: queue.Queue[str], *, request_id: int, timeout: int) -> dict[str, Any]:
+    deadline = datetime.now(timezone.utc).timestamp() + timeout
+    while True:
+        remaining = deadline - datetime.now(timezone.utc).timestamp()
+        if remaining <= 0:
+            raise RuntimeError(f"Timed out waiting for Codex app-server response id {request_id}.")
+        try:
+            line = stdout_queue.get(timeout=remaining)
+        except queue.Empty as exc:
+            raise RuntimeError(f"Timed out waiting for Codex app-server response id {request_id}.") from exc
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("id") != request_id:
+            continue
+        if "error" in payload:
+            raise RuntimeError(f"Codex app-server request failed: {payload['error']}")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Codex app-server returned an invalid response for id {request_id}.")
+        return result
+
+
+def _usage_limit_from_window(name: str, value: Any) -> UsageLimitInfo:
+    if not isinstance(value, dict):
+        return UsageLimitInfo(name=name)
+    used = value.get("usedPercent")
+    used_percent = int(used) if isinstance(used, int | float) else None
+    remaining_percent = max(0, min(100, 100 - used_percent)) if used_percent is not None else None
+    reset_epoch = value.get("resetsAt")
+    reset_at_epoch = int(reset_epoch) if isinstance(reset_epoch, int | float) else None
+    reset_at = _local_iso_from_epoch(reset_at_epoch) if reset_at_epoch is not None else None
+    duration = value.get("windowDurationMins")
+    return UsageLimitInfo(
+        name=name,
+        available=True,
+        used_percent=used_percent,
+        remaining_percent=remaining_percent,
+        reset_at=reset_at,
+        reset_at_epoch=reset_at_epoch,
+        window_duration_mins=int(duration) if isinstance(duration, int | float) else None,
+        raw=json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+def _local_iso_from_epoch(value: int) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _codex_usage_message(rate_limits: dict[str, Any]) -> str:
+    plan = _optional_str(rate_limits.get("planType"))
+    reached = _optional_str(rate_limits.get("rateLimitReachedType"))
+    parts = []
+    if plan:
+        parts.append(f"plan: {plan}")
+    if reached:
+        parts.append(f"rate limit reached: {reached}")
+    return ", ".join(parts)
+
+
+def _first_line(value: str) -> str:
+    for line in value.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _parse_codex_models(payload: dict[str, Any]) -> list[ProviderModelInfo]:
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        return []
+    models: list[ProviderModelInfo] = []
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model_id = _first_str(item.get("slug"), item.get("id"), item.get("model"))
+        if not model_id:
+            continue
+        reasoning_levels: list[ProviderReasoningLevel] = []
+        raw_reasoning = item.get("supported_reasoning_levels")
+        if isinstance(raw_reasoning, list):
+            for raw_level in raw_reasoning:
+                if not isinstance(raw_level, dict):
+                    continue
+                effort = _first_str(raw_level.get("effort"), raw_level.get("id"), raw_level.get("name"))
+                if not effort:
+                    continue
+                reasoning_levels.append(
+                    ProviderReasoningLevel(
+                        effort=effort,
+                        description=_first_str(raw_level.get("description")),
+                    )
+                )
+        models.append(
+            ProviderModelInfo(
+                id=model_id,
+                display_name=_first_str(item.get("display_name"), item.get("name"), model_id),
+                description=_first_str(item.get("description")),
+                default_reasoning_level=_optional_str(item.get("default_reasoning_level")),
+                supported_reasoning_levels=reasoning_levels,
+                visibility=_optional_str(item.get("visibility")),
+                supported_in_api=item.get("supported_in_api") if isinstance(item.get("supported_in_api"), bool) else None,
+            )
+        )
+    return models
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _event_kind(event_type: str, actor: str) -> str:

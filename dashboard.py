@@ -124,6 +124,7 @@ def _render_controls(defaults: LocalRunConfig) -> LocalRunConfig:
         qa_agent_codex_homes=qa_homes,
         model=model,
         reasoning_effort=reasoning or None,
+        agent_configs={},
         max_fix_iterations=int(max_fix_iterations),
         timeout_seconds=int(timeout_seconds),
     )
