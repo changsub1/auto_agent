@@ -41,6 +41,13 @@ dropdowns, shows those choices on agent cards, and sends them into run creation
 so `dashboard_config` records the selected model, reasoning effort, and Codex
 home.
 
+Stage 5G-1 is implemented for the course-submission path: the desktop roster
+now shows whether the selected route will run an LLM QA Agent or only
+mechanical QA, each agent's skill row opens a large right-side Prompt Editor,
+QA guideline presets are editable, and run creation snapshots the prompts used
+under `prompts/`. Saved QA prompts are passed into the Codex-backed QA Agent
+review prompt.
+
 ## Phase 1: Implemented
 
 ### Local Codex CLI Integration
@@ -612,3 +619,9 @@ Use `.gitignore` to keep generated run artifacts and local caches out of Git.
   stages explicitly, can be reordered by drag/drop or arrow controls,
   integration can be toggled, reset restores the default order, and the edited
   order is used for `workflow_graph`.
+- Stage 5G-1 is implemented: `local_prompt_overrides.json` stores local prompt
+  edits, `/prompts` endpoints expose QA presets and per-agent prompt text, the
+  roster opens a resizable Prompt Editor with Skill / Guideline, System Prompt,
+  and Effective Preview tabs, and run artifacts snapshot the exact prompt text
+  used for Planner/Code/Integrator/QA agents. QA Agent prompt overrides are
+  injected into the actual LLM QA review call.

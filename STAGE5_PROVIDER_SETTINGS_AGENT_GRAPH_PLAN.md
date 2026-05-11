@@ -400,6 +400,50 @@ Represent manual workflows as explicit stages:
 - The backend rejects invalid graphs even if the UI misses them.
 - The run monitor shows graph stages in the same order the user configured.
 
+## Stage 5G: QA Prompt and Guideline Editor
+
+Goal: support the course-submission demonstration that prompt engineering and
+AI ethics guidelines can change the same LLM QA Agent's judgment without adding
+a separate ethics-agent implementation.
+
+### Implemented Slice: Stage 5G-1
+
+- The roster sidebar shows whether the selected route will run an LLM QA Agent
+  or mechanical QA only.
+- Each agent card's skill row and settings icon open a large right-side Prompt
+  Editor.
+- The editor has three tabs:
+  - Skill / Guideline
+  - System Prompt
+  - Effective Prompt Preview
+- The editor can be resized with a width control.
+- QA presets are available:
+  - Default QA
+  - Ethics & Bias QA
+  - Accessibility QA
+  - Strict Safety QA
+- Prompt edits are stored locally in `local_prompt_overrides.json`, which is
+  ignored by Git.
+- Run creation snapshots prompt text into `runs/<run_id>/prompts/` and records
+  `prompt_settings.json`.
+- Saved QA prompts are injected into the Codex-backed QA Agent review prompt.
+
+### Submission Demo Use
+
+1. Run the same generated-app request in a route that enables `qa_1`.
+2. Save `Default QA`, run QA, and keep the resulting `qa_report.md`.
+3. Switch only the QA preset to `Ethics & Bias QA` or `Strict Safety QA`.
+4. Run again and compare the QA Agent findings and PASS/FAIL rationale.
+
+This demonstrates prompt engineering and AI ethics review criteria while
+keeping the underlying agent implementation stable.
+
+### Deferred
+
+- Full OpenAI API-key provider execution remains deferred. The current product
+  stays Codex CLI centered for the submission build, while the provider
+  abstraction leaves room for an API adapter later.
+
 ## Stage 5D: Discord Bot Control
 
 Goal: make Discord a controllable integration instead of a separate terminal

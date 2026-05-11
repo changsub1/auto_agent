@@ -1,499 +1,408 @@
-# Local Codex Multi-Agent Development MVP
+# Orchestra: 로컬 CLI 기반 멀티 에이전트 개발 앱
 
-This project is a local technical MVP for multi-agent development automation.
-It does not use an OpenAI API key directly and does not use the OpenAI SDK.
-All LLM work is delegated to the locally installed and logged-in Codex CLI
-through Python `subprocess`.
+Orchestra는 사용자가 자연어로 앱/기능 개발을 요청하면 여러 LLM 에이전트가
+기획, 구현, QA를 나누어 수행하는 로컬 데스크톱 MVP입니다.
 
-The original CLI flow is still available:
+핵심 목표는 OpenAI API 비용을 매 요청마다 쓰는 서비스가 아니라, 사용자가
+이미 로그인한 Codex CLI 구독 환경을 활용해 개인 PC에서 동작하는 개발 보조
+앱을 만드는 것입니다.
 
-```text
-User request -> Planner Agent -> Developer Agent -> mechanical QA
+## 현재 구현 요약
+
+- Tauri 데스크톱 앱 + localhost FastAPI sidecar
+- Codex CLI 기반 Planner, Code Agent, Integrator, QA Agent
+- `fast`, `balanced`, `parallel`, `manual` 실행 모드
+- Human-in-the-loop 승인 흐름
+  - 계획 승인
+  - QA 결과 승인
+  - 변경 요청
+  - 중지
+- Codex 계정, 모델, reasoning effort GUI 선택
+- Codex 5시간/주간 사용량 GUI 표시
+- manual 모드에서 에이전트 추가 및 workflow graph 편집
+- mechanical QA
+  - syntax check
+  - generated app 실행 probe
+  - Playwright screenshot
+  - console/page error 수집
+- LLM QA Agent
+  - mechanical QA report
+  - screenshot
+  - contract/plan
+  - generated app listing
+  - 사용자 지정 QA guideline/system prompt
+  를 보고 PASS/FAIL 판단
+- QA Prompt / Skill Editor
+  - Default QA
+  - Ethics & Bias QA
+  - Accessibility QA
+  - Strict Safety QA
+
+## 실행 전 준비물
+
+### 필수
+
+- Windows 10/11
+- Python 3.10 이상
+- Node.js / npm
+- Codex CLI 설치 및 로그인
+- Git
+
+### 데스크톱 앱 개발 실행에 필요
+
+- Rust / Cargo
+- Tauri CLI는 `ux/package.json`의 devDependency로 설치됩니다.
+
+### 권장
+
+- repo 내부 `.venv` 사용
+- Playwright Chromium 설치
+
+## 처음 설치
+
+PowerShell에서 저장소 루트로 이동합니다.
+
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
 ```
 
-The new Discord flow adds human-in-the-loop planning approval:
-
-```text
-/dev request
-  -> Planner Agent A draft
-  -> Planner Agent B review
-  -> Planner Agent A final plan
-  -> Architect Agent contract bundle
-  -> Discord contract approve / request changes / cancel
-  -> Scaffold Agent creates scaffold_app
-  -> Code Agents implement isolated workspaces in parallel
-  -> Integrator Agent merges generated_app
-  -> mechanical QA
-```
-
-## Requirements
-
-- Python 3.10 or newer
-- Codex CLI installed and logged in locally
-- For Discord mode: a Discord bot token
-
-Check Codex CLI first:
-
-```bash
-codex --help
-codex exec --help
-codex login status
-```
-
-## Install Python Dependencies
-
-```bash
-cd multi_codex_dev_mvp
-python -m pip install -r requirements.txt
-```
-
-`requirements.txt` contains the local API, dashboard, Discord bot, and QA
-dependencies. Codex itself must be installed separately and available as
-`codex` on PATH.
-
-For the Tauri desktop app, prefer installing these dependencies into the
-repo-local `.venv`:
+Python 의존성을 설치합니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Playwright 브라우저를 설치합니다. 브라우저 앱을 QA할 때 screenshot과
+실행 probe에 필요합니다.
+
+```powershell
 .\.venv\Scripts\python.exe -m playwright install chromium
 ```
 
-## Local CLI Usage
+프론트엔드 의존성을 설치합니다.
 
-```bash
-python main.py "CSV file upload app that previews rows and shows missing value counts."
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp\ux
+npm install
 ```
 
-Planner and Developer can use different `CODEX_HOME` values:
+Codex CLI 로그인을 확인합니다.
 
-```bash
-python main.py --planner-codex-home "C:\Users\USER\.codex_planner" --developer-codex-home "C:\Users\USER\.codex_developer" "Build a simple todo app."
+```powershell
+codex login status
+codex --version
 ```
 
-Set syntax-fix retries:
+## 데스크톱 앱 실행
 
-```bash
-python main.py --max-fix-iterations 1 "Build a CSV analysis app."
+가장 권장하는 실행 방식입니다. Tauri 앱이 FastAPI sidecar를 자동으로
+띄웁니다.
+
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp\ux
+$env:ORCHESTRA_REPO_ROOT="D:\curs\auto\multi_codex_dev_mvp"
+$env:ORCHESTRA_PYTHON="D:\curs\auto\multi_codex_dev_mvp\.venv\Scripts\python.exe"
+npm run tauri:dev
 ```
 
-## Discord Bot Usage
+주의: `npm run tauri dev`가 아니라 `npm run tauri:dev`입니다.
 
-Set environment variables:
+## 브라우저 개발 모드 실행
 
-```bat
-set DISCORD_BOT_TOKEN=your_bot_token
-set DISCORD_GUILD_ID=your_test_guild_id
+Tauri 없이 웹 UI와 FastAPI를 따로 띄워 확인할 수 있습니다.
+
+터미널 1: FastAPI 실행
+
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
+.\.venv\Scripts\python.exe run_local_api.py --host 127.0.0.1 --port 8765
 ```
 
-Optional controls:
+터미널 2: React 실행
 
-```bat
-set DISCORD_ALLOWED_CHANNEL_ID=channel_id
-set DISCORD_ALLOWED_USER_IDS=user_id_1,user_id_2
-set DISCORD_LOCAL_API_BASE_URL=http://127.0.0.1:8765
-set PLANNER_A_CODEX_HOME=C:\Users\USER\.codex_planner_a
-set PLANNER_B_CODEX_HOME=C:\Users\USER\.codex_planner_b
-set ARCHITECT_CODEX_HOME=C:\Users\USER\.codex_architect
-set SCAFFOLD_CODEX_HOME=C:\Users\USER\.codex_developer
-set DEVELOPER_CODEX_HOME=C:\Users\USER\.codex_developer
-set INTEGRATOR_CODEX_HOME=C:\Users\USER\.codex_developer
-set CODE_AGENT_CODEX_HOMES=C:\Users\USER\.codex_developer_1,C:\Users\USER\.codex_developer_2
-set CODE_AGENT_COUNT=2
-set QA_AGENT_CODEX_HOMES=C:\Users\USER\.codex_qa
-set QA_AGENT_COUNT=1
-set ROUTING_MODE=balanced
-set REFERENCE_PACK_ENABLED=1
-set PLANNER_A_REFERENCE=
-set PLANNER_B_REFERENCE=
-set CODE_AGENT_REFERENCE=karpathy/code_agent
-set INTEGRATOR_REFERENCE=karpathy/integrator
-set QA_AGENT_REFERENCE=
-set CODEX_MODEL=gpt-5.4
-set CODEX_REASONING_EFFORT=medium
-set MAX_FIX_ITERATIONS=1
-set CODEX_TIMEOUT_SECONDS=900
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp\ux
+npm run dev
 ```
 
-Run the local API first, then run the bot in a separate terminal. Runtime
-defaults that affect execution, such as Codex homes, routing, model/reasoning,
-reference profiles, and executable QA settings, must be visible to the local API
-process because FastAPI owns the workflow state and execution.
-
-```bash
-python run_local_api.py --host 127.0.0.1 --port 8765
-```
-
-```bash
-python discord_bot.py
-```
-
-In Discord:
+브라우저에서 다음 주소로 접속합니다.
 
 ```text
-/dev CSV file upload app that previews data and shows missing value counts.
+http://127.0.0.1:5173
+```
+
+## 기본 사용법
+
+1. 앱을 실행합니다.
+2. 왼쪽에서 실행 모드를 고릅니다.
+   - `fast`: 빠른 단일 구현, mechanical QA 중심
+   - `balanced`: Planner A/B + Code Agent + mechanical QA + LLM QA 가능
+   - `parallel`: 계약/스캐폴드/병렬 Code Agent/Integrator/QA
+   - `manual`: 에이전트와 workflow graph를 직접 구성
+3. Codex account/model/reasoning을 선택합니다.
+4. 아래 입력창에 만들 앱이나 기능을 설명합니다.
+5. `실행 시작`을 누릅니다.
+6. Planner 결과를 확인하고 승인합니다.
+7. 구현과 QA가 끝나면 QA 결과를 승인하거나 수정 요청합니다.
+
+## LLM QA Agent 시연 방법
+
+제출/발표 시에는 `fast`가 아니라 `balanced` 또는 `manual`을 권장합니다.
+`fast`는 기본적으로 mechanical QA만 돌 수 있습니다.
+
+앱 왼쪽 실행 모드 영역에 다음처럼 표시됩니다.
+
+```text
+QA route: LLM QA Agent enabled
+```
+
+또는
+
+```text
+QA route: mechanical QA only
+```
+
+LLM QA Agent가 실제로 돈 run은 `qa_report.md`에 다음 섹션이 생깁니다.
+
+```text
+## Codex QA Agent Reviews
+```
+
+QA Agent는 직접 코드를 수정하지 않습니다. 먼저 mechanical QA가 앱을 실행하고
+스크린샷, 콘솔 로그, syntax check, 실행 probe 결과를 만듭니다. 그 다음 LLM
+QA Agent가 그 증거와 plan/contract를 검토해 `QA_STATUS: PASS` 또는 `FAIL`을
+판단합니다.
+
+## QA Prompt / Skill Editor
+
+각 agent 카드의 `skill` 행 또는 설정 아이콘을 클릭하면 오른쪽 큰 패널이
+열립니다.
+
+탭은 다음과 같습니다.
+
+- `Skill / Guideline`
+- `System Prompt`
+- `Effective Prompt Preview`
+
+QA Agent에는 다음 preset이 있습니다.
+
+- `Default QA`
+- `Ethics & Bias QA`
+- `Accessibility QA`
+- `Strict Safety QA`
+
+저장한 prompt는 로컬 파일 `local_prompt_overrides.json`에 저장됩니다. 이 파일은
+Git에 올라가지 않습니다.
+
+run 시작 시 사용된 prompt는 다음 위치에 artifact로 저장됩니다.
+
+```text
+runs/<run_id>/prompts/
+  qa_1_skill.md
+  qa_1_system.md
+  qa_1_effective_preview.md
+  prompt_settings.json
+```
+
+수업 프로젝트에서는 같은 결과물을 두고 QA guideline만 바꾸어 QA Agent의
+판단이 달라지는 것을 시연할 수 있습니다. 예를 들어 `Default QA`에서는 통과한
+앱이 `Ethics & Bias QA` 또는 `Strict Safety QA`에서는 개인정보/편향 위험 때문에
+실패할 수 있습니다.
+
+## API Key Provider에 대한 현재 방침
+
+현재 제출판은 Codex CLI 중심입니다.
+
+OpenAI API key 기반 provider는 구조상 확장 가능하도록 provider abstraction을
+두고 있지만, 전체 과정을 API provider로 바꾸는 것은 별도 runner adapter,
+message history/state 관리, tool executor 설계가 필요합니다. 14일 제출판에서는
+범위가 커지므로 후순위입니다.
+
+## Discord 봇 실행
+
+Discord는 선택 기능입니다. 현재 데스크톱 앱이 메인 사용 경로입니다.
+
+환경 변수를 설정합니다.
+
+```powershell
+$env:DISCORD_BOT_TOKEN="your_bot_token"
+$env:DISCORD_GUILD_ID="your_test_guild_id"
+```
+
+FastAPI를 먼저 실행합니다.
+
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
+.\.venv\Scripts\python.exe run_local_api.py --host 127.0.0.1 --port 8765
+```
+
+다른 터미널에서 Discord bot을 실행합니다.
+
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
+.\.venv\Scripts\python.exe discord_bot.py
+```
+
+Discord 명령 예시:
+
+```text
+/dev 간단한 쇼핑몰 사이트 만들어줘
 /runs limit:10
 /status run_id:20260505_010000
 ```
 
-The bot controls runs through the localhost FastAPI API. It posts Planner A's
-draft, Planner B's review, and Planner A's final plan after the API worker
-finishes planning. The requesting user then gets buttons:
+## 테스트와 빌드
 
-- Approve
-- Request changes
-- Cancel
+Python 테스트:
 
-Approval starts the selected routing pipeline through the same FastAPI worker
-used by the local app. Fast and balanced routes use one `CodeAgent`; the
-parallel route starts scaffold, parallel Code Agents, integration, and QA. A
-plan revision request sends the feedback back into the API planning queue. After
-QA, the bot posts the report and any screenshots, then asks the requester to
-approve the result or record an implementation fix request. Operator-requested
-QA fixes after this checkpoint are recorded by the API but are not re-enqueued
-yet; automatic QA fix loops still run before the workflow reaches
-`awaiting_qa_approval`.
-
-`/runs` and `/status` are read-only Discord commands backed by the local API.
-`/status` includes the current active step and a short recent log tail from the
-Stage 3C observation endpoints. During long-running `/dev` flows, Discord
-progress heartbeats also use `active-step` and `logs/tail` API data instead of
-reading run files directly.
-
-`ROUTING_MODE` controls the development pipeline. The default is `balanced`:
-
-- `fast`: Planner A, one `CodeAgent`, and mechanical QA.
-- `balanced`: Planner A/B, one `CodeAgent`, mechanical QA, and one QA Agent when configured.
-- `parallel`: contract, scaffold, parallel Code Agents, Integrator, and QA.
-- `manual`: use configured code/QA counts; more than one code agent uses the parallel route.
-
-Set `QA_AGENT_COUNT=0` to run only mechanical QA for routes that would otherwise
-include Codex-backed QA review.
-
-Reference profiles are role-specific and use `pack/role` syntax. By default,
-only Code Agents and the Integrator receive the lightweight Karpathy-inspired
-coding guidance:
-
-```text
-CODE_AGENT_REFERENCE=karpathy/code_agent
-INTEGRATOR_REFERENCE=karpathy/integrator
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
+.\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-Planner and QA references are empty by default. They can be customized, for
-example:
+프론트엔드 빌드:
 
-```text
-PLANNER_A_REFERENCE=gstack/planner_a
-PLANNER_B_REFERENCE=gstack/planner_b
-QA_AGENT_REFERENCE=gstack/qa_agent
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp\ux
+npm run build
 ```
 
-At run start, the orchestrator copies only the selected curated packs into
-`runs/<run_id>/reference_packs/` and attaches the matching role file to each
-agent prompt. The ignored `reference_packs/gstack_src/` and
-`reference_packs/karpathy_src/` directories are local vendor source caches;
-their installers and source scripts are not run by this project.
+Tauri 개발 실행:
 
-Executable browser QA uses Playwright when it is installed. Install the Python
-package through `requirements.txt`, then install Chromium once:
-
-```bash
-python -m playwright install chromium
-```
-
-## Local Dashboard Usage
-
-The Streamlit dashboard is a local run control panel for testing the
-contract-first workflow without Discord.
-
-```bash
-python -m streamlit run dashboard.py
-```
-
-If Streamlit is installed in the local Miniconda Python on this machine, use:
-
-```bash
-D:\miniconda3\python.exe -m streamlit run dashboard.py
-```
-
-The dashboard supports:
-
-- `planning_only`
-- `contract_only`
-- `scaffold_only`
-
-`full_run` is still disabled in the Streamlit dashboard because Streamlit remains
-a lightweight stage test panel. Full implementation now runs through the
-FastAPI `RunWorker` path after plan approval. The dashboard reuses the same
-environment variable defaults as the Discord bot, including `CODEX_HOME`, model,
-reasoning effort, timeouts, and code-agent counts.
-
-The dashboard displays:
-
-- run id and local run path
-- `state.json`
-- `events.jsonl`
-- `transcript.md`
-- `contract/*`
-- `qa_report.md` when available
-
-It never reads or displays `auth.json`.
-
-## Local API Usage
-
-The local desktop/web UI uses a FastAPI adapter over the shared Python service
-layer. The API is local-only and must bind to `127.0.0.1` or `localhost`.
-
-Install the API dependencies:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Run the API:
-
-```bash
-python run_local_api.py --host 127.0.0.1 --port 8765
-```
-
-Available local endpoints include:
-
-- `GET /config`
-- `POST /runs`
-- `GET /runs`
-- `GET /runs/{run_id}`
-- `GET /runs/{run_id}/events`
-- `GET /runs/{run_id}/active-step`
-- `GET /runs/{run_id}/logs`
-- `GET /runs/{run_id}/logs/tail?path=...&lines=...`
-- `GET /runs/{run_id}/artifacts`
-- `GET /runs/{run_id}/artifacts/content?path=...`
-- `POST /runs/{run_id}/approve`
-- `POST /runs/{run_id}/request-changes`
-- `POST /runs/{run_id}/cancel`
-- `POST /runs/{run_id}/qa/approve`
-- `POST /runs/{run_id}/qa/request-fix`
-
-`POST /runs` creates run state quickly, records the selected route/workflow, and
-enqueues background planning through the local FastAPI run worker. The UI can
-poll run detail, events, and artifacts while planning is in progress. Approval,
-revision, and cancel actions are persisted through the same service layer and
-enqueue worker jobs.
-
-Plan approval now continues the implementation workflow through
-`WorkflowEngine` instead of stopping at `development_queued`. Fast and balanced
-routes run a single `CodeAgent(code_1)` directly against `generated_app`, then
-mechanical QA and optional LLM QA. Parallel and manual multi-code routes run the
-contract/scaffold/parallel-code/integrator/QA pipeline. The run then waits at
-`awaiting_qa_approval` for the operator to approve the result or request later
-fix work.
-
-Observation endpoints expose active worker state, structured artifact metadata,
-and log tails without requiring clients to read files directly. Log reads are
-restricted to files under each run's `logs/` directory.
-
-## React/Tauri App Usage
-
-The `ux/` folder is now a Vite React app that reads the local FastAPI API
-instead of static mock data.
-
-Development mode:
-
-```bash
-cd ux
-npm install
-npm run dev
-```
-
-In a separate terminal:
-
-```bash
-python run_local_api.py --host 127.0.0.1 --port 8765
-```
-
-Tauri desktop mode:
-
-```bash
-cd ux
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp\ux
 npm run tauri:dev
 ```
 
-The Tauri shell chooses a free local port, starts `run_local_api.py` as a
-sidecar process, and gives the React UI the API URL through the `api_base_url`
-Tauri command. It uses `ORCHESTRA_PYTHON` when set; otherwise it prefers
-`../.venv/Scripts/python.exe` for the sidecar before falling back to system
-Python.
-It waits for `/health` before the app is considered ready and writes sidecar
-stdout/stderr to `tmp/tauri_sidecar/`. The first packaging target is Windows
-NSIS.
-
-Useful Tauri sidecar overrides:
+Tauri 패키징:
 
 ```powershell
-set ORCHESTRA_REPO_ROOT=D:\curs\auto\multi_codex_dev_mvp
-set ORCHESTRA_PYTHON=D:\curs\auto\multi_codex_dev_mvp\.venv\Scripts\python.exe
+cd D:\curs\auto\multi_codex_dev_mvp\ux
+npm run tauri:build
 ```
 
-Rust/Cargo must be installed before `pnpm tauri:dev` or `pnpm tauri:build` can
-compile the desktop shell.
-The project uses npm scripts for Tauri commands, so pnpm is optional.
-
-## Current Roadmap
-
-Stage 3 is complete for the local API workflow and Discord adapter MVP. The
-next step is Stage 4: finish the app surface, package it as a local desktop app,
-and dogfood it on real personal development requests before final cleanup.
-
-See `STAGE4_APP_COMPLETION_PACKAGING_PLAN.md` for the detailed app completion,
-sidecar hardening, Windows packaging, and dogfooding plan.
-
-## Run Output
-
-Each run creates a timestamped directory:
+## 주요 폴더
 
 ```text
-runs/YYYYMMDD_HHMMSS/
+app_services.py              FastAPI와 GUI가 공유하는 서비스 계층
+local_api.py                 localhost FastAPI adapter
+run_worker.py                background run worker
+workflow_engine.py           route/manual graph 실행 엔진
+local_dashboard_runner.py    실제 agent stage 실행 helper
+agents.py                    Planner/Code/Integrator/QA agent prompt 정의
+executable_qa.py             앱 실행 probe, screenshot, browser QA
+qa.py                        mechanical QA 결과 결합
+ux/                          React + Tauri GUI
+reference_packs/             agent skill/reference pack
+runs/                        실행 결과물, Git 제외
+```
+
+## Run 결과물 구조
+
+각 실행은 `runs/<run_id>/`에 저장됩니다.
+
+```text
+runs/<run_id>/
   state.json
   events.jsonl
   transcript.md
-  reference_packs/
-    karpathy/
-      reference_pack_manifest.json
-      code_agent.md
-      integrator.md
-    gstack/
-      reference_pack_manifest.json
-      planner_a.md
-      planner_b.md
-      code_agent.md
-      integrator.md
-      qa_agent.md
-  plan.md
+  route.json
+  workflow_graph.json
   planning/
-    01_planner_a_draft.md
-    02_planner_b_review.md
-    03_final_plan.md
   contract/
-    requirements.md
-    architecture.md
-    api_contract.md
-    data_model.md
-    task_manifest.json
-    file_ownership.md
-    acceptance_tests.md
-    integration_plan.md
   scaffold_app/
   agent_workspaces/
-    code_1/
-    code_2/
   agent_outputs/
-    assignment_summary.md
-    code_1_summary.md
-    code_2_summary.md
   integration/
-    merged_app/
-    merge_seed_report.md
   generated_app/
-    app.py
-    requirements.txt
-    README.md
   qa/
     attempt_00/
       syntax_report.md
       executable_qa_report.md
       screenshot_initial.png
       screenshot_after_keys.png
+      browser_console.json
+      qa_1_review.md
+  prompts/
+    prompt_settings.json
+    qa_1_skill.md
+    qa_1_system.md
+    qa_1_effective_preview.md
   qa_report.md
   logs/
-    *_prompt.txt
-    *_stdout.txt
-    *_stderr.txt
-    *_meta.txt
 ```
 
-## Session and Memory Design
+## 자주 나는 문제
 
-The local worker and Discord workflow are session-oriented.
+### `npm run tauri dev`가 실패함
 
-- Each agent has its own Codex session id in `state.json`.
-- New agent calls use `codex exec ... -`.
-- Follow-up calls try `codex exec resume <session_id> -`.
-- Prompts are sent through stdin, not shell interpolation.
-- If resume fails with a Codex execution error, the shared local workflow helpers
-  fall back to a fresh Codex call using the latest relevant artifact instead of
-  the full transcript.
-
-Local files are still written for audit and recovery:
-
-- `state.json`: current run status, Discord ids, artifact paths, agent session ids
-- `events.jsonl`: append-only machine-readable event log
-- `transcript.md`: human-readable conversation and artifact log
-- `planning/*.md`: planning artifacts
-- `contract/*`: Architect-created contract bundle and task manifest
-- `scaffold_app/`: shared skeleton copied into each code-agent workspace
-- `agent_workspaces/*`: isolated parallel code-agent workspaces
-- `integration/merged_app`: Integrator output before it is copied to `generated_app`
-- `qa/`: syntax reports, executable QA reports, screenshots, and runtime logs
-- `logs/*`: raw Codex prompt/stdout/stderr/meta logs
-
-The engine intentionally avoids sending the full transcript on every turn. It
-prefers Codex session resume and only sends the new feedback, review, or latest
-artifact needed for that turn.
-
-## Multi-account Codex CLI Setup
-
-Use one `CODEX_HOME` directory per local Codex account. Configure file-based
-credential storage in each profile so each account keeps its own `auth.json`:
-
-```toml
-cli_auth_credentials_store = "file"
-```
-
-Example PowerShell login flow:
+명령어가 다릅니다.
 
 ```powershell
-$env:CODEX_HOME = "D:\codex_profiles\account_1"
-codex.cmd login
-codex.cmd login status
-
-$env:CODEX_HOME = "D:\codex_profiles\account_2"
-codex.cmd login
-codex.cmd login status
+npm run tauri:dev
 ```
 
-Then assign those profile paths through the existing agent environment
-variables, such as `PLANNER_A_CODEX_HOME`, `PLANNER_B_CODEX_HOME`, and
-`DEVELOPER_CODEX_HOME`. The Phase 3 plan in `PARALLEL_AGENT_PLAN.md` describes
-the future generalized account and agent registry.
+### Tauri 빌드에서 Rust 관련 오류가 남
 
-Current assignment example with Planner A/B on account 1 and the remaining
-agents on account 2:
+Rust/Cargo가 설치되어 있어야 합니다. Windows에서는 Rustup 설치 후 새 터미널을
+열어 다시 실행하세요.
 
-```bat
-set PLANNER_A_CODEX_HOME=D:\codex_profiles\account_1
-set PLANNER_B_CODEX_HOME=D:\codex_profiles\account_1
-set ARCHITECT_CODEX_HOME=D:\codex_profiles\account_2
-set SCAFFOLD_CODEX_HOME=D:\codex_profiles\account_2
-set CODE_AGENT_CODEX_HOMES=D:\codex_profiles\account_2
-set CODE_AGENT_COUNT=2
-set QA_AGENT_CODEX_HOMES=D:\codex_profiles\account_2
-set QA_AGENT_COUNT=1
-set INTEGRATOR_CODEX_HOME=D:\codex_profiles\account_2
-set DEVELOPER_CODEX_HOME=D:\codex_profiles\account_2
+```powershell
+rustc --version
+cargo --version
 ```
 
-## Safety Notes
+### Playwright browser가 없다고 나옴
 
-- User requests are never executed as shell commands.
-- User requests are passed only as Codex prompt text through stdin.
-- `subprocess.run` uses list arguments and `shell=False`.
-- Codex calls use `--skip-git-repo-check`.
-- New Codex exec calls use `--sandbox workspace-write`.
-- Generated apps are created under each run's `generated_app` directory.
-- Generated `.bat` and `.cmd` files are normalized to CRLF line endings.
-
-## Syntax Check
-
-```bash
-python -m py_compile main.py agents.py codex_runner.py workspace_manager.py parallel_workflow.py local_dashboard_runner.py executable_qa.py qa.py state_store.py config.py discord_reporter.py discord_ui.py debate_engine.py discord_api_client.py discord_api_engine.py discord_bot.py dashboard.py app_services.py local_api.py run_local_api.py run_worker.py workflow_engine.py
+```powershell
+cd D:\curs\auto\multi_codex_dev_mvp
+.\.venv\Scripts\python.exe -m playwright install chromium
 ```
+
+### LLM QA가 안 돈 것 같음
+
+- `fast` 모드인지 확인합니다.
+- GUI에서 `QA route: LLM QA Agent enabled`인지 확인합니다.
+- `balanced` 또는 `manual`에서 QA Agent가 enabled인지 확인합니다.
+- run 결과의 `qa_report.md`에 `## Codex QA Agent Reviews`가 있는지 확인합니다.
+
+### Codex 사용량이 부족함
+
+앱의 `Resources` 패널에서 5시간/주간 limit을 확인합니다. Codex CLI에서도 직접
+확인할 수 있습니다.
+
+```text
+/status
+```
+
+## Git에 올리지 않는 파일
+
+다음 파일/폴더는 로컬 실행 결과 또는 개인 설정이라 Git에서 제외됩니다.
+
+```text
+.venv/
+.env
+runs/
+local_app_settings.json
+local_prompt_overrides.json
+ux/node_modules/
+ux/dist/
+ux/src-tauri/target/
+```
+
+## 발표 포인트
+
+- 프롬프트 엔지니어링:
+  - Planner/Code/QA Agent별 역할 프롬프트 분리
+  - QA Prompt / Skill Editor에서 guideline 변경 가능
+  - 사용 prompt를 run artifact로 보존
+- AI 윤리:
+  - `Ethics & Bias QA` preset
+  - 개인정보, 차별, 편향, 민감정보 수집 위험 검토
+  - 같은 결과물도 guideline에 따라 다른 QA 판단 가능
+- Human-in-the-loop:
+  - 계획 승인 후 구현
+  - QA 결과 승인 또는 수정 요청
+- 비용/실용성:
+  - API key 중심 SaaS가 아니라 사용자의 로컬 Codex CLI 구독 환경 활용
+  - 개인 사용자를 위한 CLI/desktop 중심 멀티 에이전트 개발 앱

@@ -60,6 +60,7 @@ class LocalRunConfig:
     model: str | None
     reasoning_effort: str | None
     agent_configs: dict[str, dict[str, object]]
+    prompt_overrides: dict[str, dict[str, str]]
     max_fix_iterations: int
     timeout_seconds: int
 
@@ -82,6 +83,7 @@ class LocalRunConfig:
             model=_str_env("CODEX_MODEL"),
             reasoning_effort=_str_env("CODEX_REASONING_EFFORT"),
             agent_configs={},
+            prompt_overrides={},
             max_fix_iterations=_int_env("MAX_FIX_ITERATIONS", 1),
             timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 900),
         )
@@ -144,6 +146,7 @@ def run_planning_stage(
     planner_a = PlannerAgentA(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, "planner_a"),
         **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = _call_codex_with_resume(
@@ -172,6 +175,7 @@ def run_planning_stage(
         planner_b = PlannerAgentB(
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
+            reference_markdown=_agent_reference_markdown(config, "planner_b"),
             **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = _call_codex_with_resume(
@@ -292,6 +296,7 @@ async def run_planning_stage_async(
     planner_a = PlannerAgentA(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, "planner_a"),
         **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = await _call_codex_with_resume_async(
@@ -325,6 +330,7 @@ async def run_planning_stage_async(
         planner_b = PlannerAgentB(
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
+            reference_markdown=_agent_reference_markdown(config, "planner_b"),
             **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = await _call_codex_with_resume_async(
@@ -711,6 +717,7 @@ async def run_integration_stage_async(
     integrator = IntegratorAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, "integrator"),
         **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     integration_result = await _call_codex_with_resume_async(
@@ -832,6 +839,7 @@ async def run_llm_qa_stage_async(
             agent_id=agent_id,
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
+            reference_markdown=_agent_reference_markdown(config, agent_id),
             **_agent_run_kwargs(config, agent_id, codex_home),
         )
         result = await agent.review_result_async(
@@ -1035,6 +1043,7 @@ async def run_targeted_fix_stage_async(
     integrator = IntegratorAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, "integrator"),
         **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     repair_result = await _call_codex_with_resume_async(
@@ -1251,6 +1260,7 @@ async def _run_code_agent_assignment_async(
         agent_id=assignment.agent_id,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, assignment.agent_id),
         **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
@@ -1281,6 +1291,7 @@ async def _run_code_agent_fix_async(
         agent_id=assignment.agent_id,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        reference_markdown=_agent_reference_markdown(config, assignment.agent_id),
         **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
@@ -1437,6 +1448,28 @@ def _agent_run_kwargs(config: LocalRunConfig, agent_id: str, codex_home: str | N
         "model": _agent_model(config, agent_id),
         "reasoning_effort": _agent_reasoning_effort(config, agent_id),
     }
+
+
+def _agent_reference_markdown(config: LocalRunConfig, agent_id: str) -> str | None:
+    prompt_config = config.prompt_overrides.get(agent_id)
+    if not isinstance(prompt_config, dict):
+        prompt_config = config.prompt_overrides.get(_agent_role_key(agent_id), {})
+    parts: list[str] = []
+    system_prompt = _config_str(prompt_config.get("system_prompt")) if isinstance(prompt_config, dict) else None
+    skill_markdown = _config_str(prompt_config.get("skill_markdown")) if isinstance(prompt_config, dict) else None
+    if system_prompt:
+        parts.append(f"System prompt override:\n{system_prompt}")
+    if skill_markdown:
+        parts.append(f"Skill / guideline:\n{skill_markdown}")
+    return "\n\n".join(parts) or None
+
+
+def _agent_role_key(agent_id: str) -> str:
+    if agent_id.startswith("code_"):
+        return "code_agent"
+    if agent_id.startswith("qa_"):
+        return "qa_agent"
+    return agent_id
 
 
 def _agent_codex_home(config: LocalRunConfig, agent_id: str, fallback: str | None) -> str | None:

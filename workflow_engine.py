@@ -518,6 +518,7 @@ def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
         model=_optional_str(dashboard_config.get("model")),
         reasoning_effort=_optional_str(dashboard_config.get("reasoning_effort")),
         agent_configs=_agent_configs(dashboard_config.get("agent_configs")),
+        prompt_overrides=_prompt_overrides(dashboard_config.get("prompt_overrides")),
         max_fix_iterations=_int_value(dashboard_config.get("max_fix_iterations"), 1),
         timeout_seconds=_int_value(dashboard_config.get("timeout_seconds"), 900),
     )
@@ -745,4 +746,19 @@ def _agent_configs(value: Any) -> dict[str, dict[str, object]]:
     for agent_id, config in value.items():
         if isinstance(agent_id, str) and isinstance(config, dict):
             result[agent_id] = dict(config)
+    return result
+
+
+def _prompt_overrides(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for agent_id, prompt_config in value.items():
+        if not isinstance(agent_id, str) or not isinstance(prompt_config, dict):
+            continue
+        result[agent_id] = {
+            str(key): str(text)
+            for key, text in prompt_config.items()
+            if isinstance(key, str) and text is not None
+        }
     return result

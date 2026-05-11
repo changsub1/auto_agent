@@ -125,6 +125,7 @@ def _render_controls(defaults: LocalRunConfig) -> LocalRunConfig:
         model=model,
         reasoning_effort=reasoning or None,
         agent_configs={},
+        prompt_overrides={},
         max_fix_iterations=int(max_fix_iterations),
         timeout_seconds=int(timeout_seconds),
     )

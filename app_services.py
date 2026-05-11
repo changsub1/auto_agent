@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
     tomllib = None  # type: ignore[assignment]
 
 from local_dashboard_runner import LocalRunConfig, REASONING_EFFORTS, RUN_MODES
-from reference_packs import DEFAULT_REFERENCE_PROFILES
+from reference_packs import DEFAULT_REFERENCE_PROFILES, normalize_reference_profile
 from run_worker import RunJob, RunWorker
 from routing import ROUTING_MODES, RoutingDecision, decide_route, normalize_routing_mode
 from state_store import StateStore
@@ -201,6 +201,46 @@ class LocalAppSettings(BaseModel):
     default_model: str | None = None
     default_reasoning_effort: str | None = None
     agent_configs: list[AgentProviderConfig] = Field(default_factory=list)
+
+
+class AgentPromptOverride(BaseModel):
+    agent_id: str
+    preset: str | None = None
+    skill_markdown: str = ""
+    system_prompt: str = ""
+
+    @field_validator("agent_id")
+    @classmethod
+    def _strip_agent_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("agent_id is required")
+        return stripped
+
+
+class AgentPromptConfig(BaseModel):
+    agent_id: str
+    display_name: str
+    role: str
+    preset: str | None = None
+    default_skill_markdown: str = ""
+    skill_markdown: str = ""
+    default_system_prompt: str = ""
+    system_prompt: str = ""
+    effective_prompt_preview: str = ""
+    saved: bool = False
+
+
+class PromptPresetInfo(BaseModel):
+    id: str
+    label: str
+    description: str
+    skill_markdown: str
+    system_prompt: str = ""
+
+
+class PromptCatalog(BaseModel):
+    presets: list[PromptPresetInfo]
 
 
 class OperatorActionRequest(BaseModel):
@@ -576,6 +616,197 @@ class SettingsService:
         return self.get_settings()
 
 
+PROMPT_PRESETS: dict[str, PromptPresetInfo] = {
+    "default_qa": PromptPresetInfo(
+        id="default_qa",
+        label="Default QA",
+        description="Functional QA against acceptance criteria, runtime evidence, screenshots, and mechanical QA.",
+        system_prompt="You are an evidence-based QA reviewer. Decide only from the provided contract, reports, files, and screenshots.",
+        skill_markdown=(
+            "Review whether the generated app satisfies the approved request and acceptance criteria.\n"
+            "- Treat mechanical QA FAIL as blocking.\n"
+            "- Treat mechanical QA SKIP as a risk that needs explicit mention.\n"
+            "- Use screenshots to identify blank pages, broken layout, missing primary UI, or obvious visual regressions.\n"
+            "- Do not invent requirements outside the approved plan.\n"
+            "- Return QA_STATUS: PASS only when the available evidence supports the result."
+        ),
+    ),
+    "ethics_bias_qa": PromptPresetInfo(
+        id="ethics_bias_qa",
+        label="Ethics & Bias QA",
+        description="Adds bias, discrimination, privacy, and harmful-output review criteria.",
+        system_prompt="You are an ethics-aware QA reviewer. Apply functional QA plus bias, fairness, privacy, and harm checks.",
+        skill_markdown=(
+            "Apply the default QA checks, then review AI ethics risks.\n"
+            "- Flag content or UI flows that could reinforce discrimination by race, gender, age, disability, nationality, religion, or socioeconomic status.\n"
+            "- Flag stereotyping, exclusionary defaults, unsafe demographic inference, or unsupported sensitive-attribute collection.\n"
+            "- Flag privacy risks such as unnecessary personal data collection, insecure storage hints, or unclear consent.\n"
+            "- If an ethics risk is material, return QA_STATUS: FAIL and recommend a planning or implementation fix.\n"
+            "- Distinguish concrete evidence from speculative risk."
+        ),
+    ),
+    "accessibility_qa": PromptPresetInfo(
+        id="accessibility_qa",
+        label="Accessibility QA",
+        description="Adds visual accessibility, keyboard, contrast, labeling, and layout review criteria.",
+        system_prompt="You are an accessibility-focused QA reviewer. Apply functional QA plus WCAG-oriented usability checks.",
+        skill_markdown=(
+            "Apply the default QA checks, then review accessibility risks.\n"
+            "- Check screenshots and reports for unreadable text, low contrast, tiny controls, clipped text, or overlapping content.\n"
+            "- Treat missing keyboard support as a risk for interactive apps when evidence is absent.\n"
+            "- Flag unlabeled controls, icon-only actions without clear labels, or forms without clear input purpose when visible.\n"
+            "- Return QA_STATUS: FAIL for severe accessibility blockers; otherwise PASS with risks."
+        ),
+    ),
+    "strict_safety_qa": PromptPresetInfo(
+        id="strict_safety_qa",
+        label="Strict Safety QA",
+        description="Conservative review mode for demos that should fail on unresolved safety, privacy, or execution uncertainty.",
+        system_prompt="You are a strict safety QA reviewer. Prefer FAIL when important evidence is missing or safety risk is unresolved.",
+        skill_markdown=(
+            "Apply a conservative review policy.\n"
+            "- Return QA_STATUS: FAIL when mechanical QA is FAIL, when browser execution is skipped for a browser app, or when screenshots are missing for a visual app.\n"
+            "- Return FAIL for any unresolved privacy, data safety, bias, or harmful-content risk that could affect users.\n"
+            "- Require concrete evidence for PASS.\n"
+            "- Keep findings actionable and tied to the report, screenshots, files, or approved requirements."
+        ),
+    ),
+}
+
+
+class PromptService:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        self.prompts_path = self.project_root / "local_prompt_overrides.json"
+
+    def catalog(self) -> PromptCatalog:
+        return PromptCatalog(presets=list(PROMPT_PRESETS.values()))
+
+    def get_prompt(self, agent_id: str) -> AgentPromptConfig:
+        return self._prompt_config(agent_id)
+
+    def save_prompt(self, payload: AgentPromptOverride) -> AgentPromptConfig:
+        data = self._read_overrides()
+        override = payload.model_dump()
+        data[payload.agent_id] = override
+        self.prompts_path.write_text(_json_text({"overrides": data}), encoding="utf-8")
+        return self.get_prompt(payload.agent_id)
+
+    def reset_prompt(self, agent_id: str) -> AgentPromptConfig:
+        data = self._read_overrides()
+        data.pop(agent_id, None)
+        self.prompts_path.write_text(_json_text({"overrides": data}), encoding="utf-8")
+        return self.get_prompt(agent_id)
+
+    def effective_prompt_overrides(self, agent_ids: list[str] | None = None) -> dict[str, dict[str, str]]:
+        ids = agent_ids or self._default_agent_ids()
+        result: dict[str, dict[str, str]] = {}
+        for agent_id in ids:
+            config = self._prompt_config(agent_id)
+            if config.skill_markdown.strip() or config.system_prompt.strip():
+                result[agent_id] = {
+                    "preset": config.preset or "",
+                    "skill_markdown": config.skill_markdown,
+                    "system_prompt": config.system_prompt,
+                }
+        return result
+
+    def record_run_snapshots(self, store: StateStore, agent_ids: list[str]) -> dict[str, dict[str, str]]:
+        snapshots: dict[str, dict[str, str]] = {}
+        prompt_overrides = self.effective_prompt_overrides(agent_ids)
+        for agent_id in agent_ids:
+            config = self._prompt_config(agent_id)
+            if not (config.skill_markdown.strip() or config.system_prompt.strip()):
+                continue
+            skill_path = store.write_artifact(
+                f"prompts/{agent_id}_skill.md",
+                config.skill_markdown,
+                artifact_name=f"{agent_id}_skill_prompt",
+            )
+            system_path = store.write_artifact(
+                f"prompts/{agent_id}_system.md",
+                config.system_prompt,
+                artifact_name=f"{agent_id}_system_prompt",
+            )
+            effective_path = store.write_artifact(
+                f"prompts/{agent_id}_effective_preview.md",
+                config.effective_prompt_preview,
+                artifact_name=f"{agent_id}_effective_prompt",
+            )
+            snapshots[agent_id] = {
+                "preset": config.preset or "",
+                "skill": store.to_relative(skill_path),
+                "system": store.to_relative(system_path),
+                "effective_preview": store.to_relative(effective_path),
+            }
+        settings_path = store.write_artifact(
+            "prompts/prompt_settings.json",
+            _json_text(prompt_overrides),
+            artifact_name="prompt_settings",
+        )
+        state = store.load()
+        state["prompt_snapshots"] = snapshots
+        store.save(state)
+        store.append_event(
+            "prompt_snapshots_saved",
+            "system",
+            "Agent prompt snapshots saved",
+            {"path": store.to_relative(settings_path), "agents": list(snapshots)},
+        )
+        return snapshots
+
+    def _prompt_config(self, agent_id: str) -> AgentPromptConfig:
+        agent_id = agent_id.strip()
+        role = _prompt_role(agent_id)
+        preset_id = "default_qa" if role == "qa_agent" else None
+        default_skill = _default_skill_markdown(self.project_root, role)
+        default_system = _default_system_prompt(role)
+        if role == "qa_agent":
+            preset = PROMPT_PRESETS[preset_id or "default_qa"]
+            default_skill = preset.skill_markdown
+            default_system = preset.system_prompt
+        override = self._read_overrides().get(agent_id, {})
+        if isinstance(override, dict):
+            chosen_preset = str(override.get("preset") or preset_id or "")
+            if chosen_preset in PROMPT_PRESETS and not override.get("skill_markdown"):
+                default_skill = PROMPT_PRESETS[chosen_preset].skill_markdown
+                default_system = PROMPT_PRESETS[chosen_preset].system_prompt
+            skill = str(override.get("skill_markdown") if override.get("skill_markdown") is not None else default_skill)
+            system = str(override.get("system_prompt") if override.get("system_prompt") is not None else default_system)
+            preset_id = chosen_preset or preset_id
+            saved = bool(override)
+        else:
+            skill = default_skill
+            system = default_system
+            saved = False
+        preview = _effective_prompt_preview(system, skill)
+        return AgentPromptConfig(
+            agent_id=agent_id,
+            display_name=_actor_label(agent_id),
+            role=role,
+            preset=preset_id,
+            default_skill_markdown=default_skill,
+            skill_markdown=skill,
+            default_system_prompt=default_system,
+            system_prompt=system,
+            effective_prompt_preview=preview,
+            saved=saved,
+        )
+
+    def _read_overrides(self) -> dict[str, dict[str, object]]:
+        if not self.prompts_path.exists():
+            return {}
+        try:
+            payload = _read_json(self.prompts_path)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        overrides = payload.get("overrides") if isinstance(payload, dict) else None
+        return {key: value for key, value in overrides.items() if isinstance(key, str) and isinstance(value, dict)} if isinstance(overrides, dict) else {}
+
+    def _default_agent_ids(self) -> list[str]:
+        return ["planner_a", "planner_b", "planner_c", "code_1", "code_2", "integrator", "qa_1", "qa_2"]
+
+
 class ProviderService:
     def __init__(self, project_root: Path) -> None:
         self.project_root = Path(project_root)
@@ -743,7 +974,8 @@ class RunService:
         return RunDetail(**self._summary_from_state(run_dir, state).model_dump(), state=state)
 
     def create_run(self, request: RunCreateRequest) -> RunDetail:
-        config = self._local_config_from_request(request)
+        prompt_service = PromptService(self.project_root)
+        config = self._local_config_from_request(request, prompt_service=prompt_service)
         run_dir = create_run_dir(self.project_root)
         create_logs_dir(run_dir)
         store = StateStore(run_dir)
@@ -764,6 +996,7 @@ class RunService:
         self._record_route(store, route)
         if request.workflow_graph is not None:
             self._record_workflow_graph(store, request.workflow_graph)
+        prompt_service.record_run_snapshots(store, _run_prompt_agent_ids(route, request.workflow_graph))
         store.set_status("planning_queued")
         return self.get_run(run_dir.name)
 
@@ -855,10 +1088,19 @@ class RunService:
         store.set_status("qa_fix_requested")
         return self.get_run(run_id)
 
-    def _local_config_from_request(self, request: RunCreateRequest) -> LocalRunConfig:
+    def _local_config_from_request(self, request: RunCreateRequest, *, prompt_service: PromptService | None = None) -> LocalRunConfig:
         defaults = LocalRunConfig.from_env()
         code_count = request.code_agent_count if request.code_agent_count is not None else defaults.code_agent_count
         qa_count = request.qa_agent_count if request.qa_agent_count is not None else defaults.qa_agent_count
+        agent_ids = (
+            _workflow_graph_prompt_agent_ids(request.workflow_graph)
+            if request.workflow_graph is not None
+            else _request_prompt_agent_ids(
+                planner_count=request.planner_count if request.planner_count is not None else defaults.planner_count,
+                code_agent_count=code_count,
+                qa_agent_count=qa_count,
+            )
+        )
         return LocalRunConfig(
             user_request=request.user_request,
             run_mode=request.dashboard_mode,
@@ -876,6 +1118,7 @@ class RunService:
             model=request.model if request.model is not None else defaults.model,
             reasoning_effort=request.reasoning_effort if request.reasoning_effort is not None else defaults.reasoning_effort,
             agent_configs=_agent_config_map(request.agent_configs or []),
+            prompt_overrides=(prompt_service or PromptService(self.project_root)).effective_prompt_overrides(agent_ids),
             max_fix_iterations=(
                 request.max_fix_iterations if request.max_fix_iterations is not None else defaults.max_fix_iterations
             ),
@@ -934,6 +1177,7 @@ class RunService:
                 "qa_agents": config.qa_agent_codex_homes,
             },
             "agent_configs": config.agent_configs,
+            "prompt_overrides": config.prompt_overrides,
         }
         state = store.load()
         state["dashboard_config"] = payload
@@ -1697,6 +1941,111 @@ def _actor_label(actor: str) -> str:
     if actor.startswith("qa_"):
         return f"QA Agent {actor.split('_', 1)[1]}"
     return labels.get(actor, actor.replace("_", " ").title())
+
+
+def _prompt_role(agent_id: str) -> str:
+    if agent_id.startswith("code_"):
+        return "code_agent"
+    if agent_id.startswith("qa_"):
+        return "qa_agent"
+    return agent_id
+
+
+def _default_system_prompt(role: str) -> str:
+    if role == "planner_a":
+        return "You are a planning agent. Produce a concrete, small, testable implementation plan from the user request."
+    if role == "planner_b":
+        return "You are a planning reviewer. Find missing requirements, risks, and unclear acceptance criteria."
+    if role == "code_agent":
+        return "You are a code implementation agent. Modify only the assigned workspace and keep the app runnable."
+    if role == "integrator":
+        return "You are an integration agent. Merge completed work into a coherent generated app without unrelated changes."
+    return ""
+
+
+def _default_skill_markdown(project_root: Path, role: str) -> str:
+    profile = DEFAULT_REFERENCE_PROFILES.get(role, "")
+    if not profile:
+        return ""
+    try:
+        normalized = normalize_reference_profile(profile)
+    except ValueError:
+        return ""
+    if not normalized:
+        return ""
+    pack_id, profile_role = normalized.split("/", 1)
+    manifest_path = project_root / "reference_packs" / pack_id / "reference_pack_manifest.json"
+    if not manifest_path.exists():
+        return ""
+    try:
+        manifest = _read_json(manifest_path)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    role_map = manifest.get("default_role_files")
+    if not isinstance(role_map, dict):
+        return ""
+    raw_path = role_map.get(profile_role)
+    if not isinstance(raw_path, str):
+        return ""
+    source_path = project_root / raw_path
+    source_root = project_root / "reference_packs" / pack_id
+    try:
+        source_path.resolve().relative_to(source_root.resolve())
+    except ValueError:
+        return ""
+    if not source_path.exists() or not source_path.is_file():
+        return ""
+    try:
+        text = source_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    return text[:12000].rstrip()
+
+
+def _effective_prompt_preview(system_prompt: str, skill_markdown: str) -> str:
+    parts = []
+    if system_prompt.strip():
+        parts.append(f"System prompt override:\n{system_prompt.strip()}")
+    if skill_markdown.strip():
+        parts.append(f"Skill / guideline:\n{skill_markdown.strip()}")
+    return "\n\n".join(parts)
+
+
+def _request_prompt_agent_ids(*, planner_count: int, code_agent_count: int, qa_agent_count: int) -> list[str]:
+    ids = ["planner_a"]
+    if planner_count >= 2:
+        ids.append("planner_b")
+    if planner_count >= 3:
+        ids.append("planner_c")
+    ids.extend(f"code_{index}" for index in range(1, max(1, code_agent_count) + 1))
+    ids.append("integrator")
+    ids.extend(f"qa_{index}" for index in range(1, max(0, qa_agent_count) + 1))
+    return ids
+
+
+def _run_prompt_agent_ids(route: RoutingDecision, graph: WorkflowGraph | None) -> list[str]:
+    if graph is not None:
+        return _workflow_graph_prompt_agent_ids(graph)
+    return _request_prompt_agent_ids(
+        planner_count=route.planner_count,
+        code_agent_count=route.code_agent_count,
+        qa_agent_count=route.qa_agent_count,
+    )
+
+
+def _workflow_graph_prompt_agent_ids(graph: WorkflowGraph) -> list[str]:
+    ids: list[str] = []
+    for stage in graph.stages:
+        ids.extend(agent_id for agent_id in stage.agents if agent_id != "mechanical_qa")
+    return _merge_text_values(ids)
+
+
+def _merge_text_values(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def _event_status(event_type: str, message: str, data: dict[str, Any]) -> str:

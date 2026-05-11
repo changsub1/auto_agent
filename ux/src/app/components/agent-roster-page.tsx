@@ -22,6 +22,8 @@ import {
   UserPlus,
 } from "lucide-react";
 import {
+  AgentPromptConfig,
+  PromptPresetInfo,
   AgentProviderConfig,
   AppConfig,
   LocalAppSettings,
@@ -35,7 +37,11 @@ import {
   getRuntimeHealth,
   getRuntimeUsage,
   listProviders,
+  loadAgentPrompt,
+  loadPromptCatalog,
   loadSettings,
+  resetAgentPrompt,
+  saveAgentPrompt,
   saveSettings,
 } from "../api";
 
@@ -381,6 +387,7 @@ function AgentCard({
   onConfigChange,
   onToggle,
   onDelete,
+  onEditPrompt,
 }: {
   agent: Agent;
   lang: Lang;
@@ -394,6 +401,7 @@ function AgentCard({
   onConfigChange?: (patch: Partial<AgentProviderConfig>) => void;
   onToggle?: () => void;
   onDelete?: () => void;
+  onEditPrompt?: () => void;
 }) {
   const tint = tintFor(agent.name);
   const updateConfig = onConfigChange || ((_patch: Partial<AgentProviderConfig>) => undefined);
@@ -420,7 +428,7 @@ function AgentCard({
           </div>
         </div>
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
-          <button className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800" title="Settings">
+          <button onClick={onEditPrompt} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800" title="Skill / Prompt">
             <Settings className="size-3.5 text-slate-500 dark:text-slate-500" />
           </button>
           {editable && (
@@ -448,7 +456,7 @@ function AgentCard({
         <Meta label={lang === "ko" ? "계정" : "account"} value={agent.account} mono />
         <Meta label={lang === "ko" ? "모델" : "model"} value={agent.model} mono />
         <Meta label={lang === "ko" ? "추론" : "reasoning"} value={agent.reasoning} />
-        <Meta label={lang === "ko" ? "스킬" : "skill"} value={agent.skill} mono icon={<FileText className="size-3" />} />
+        <SkillMeta label={lang === "ko" ? "스킬" : "skill"} value={agent.skill} onClick={onEditPrompt} />
         <Meta label={lang === "ko" ? "세션" : "session"} value={agent.sessionId} mono />
       </div>
       {codexConfigurable && (
@@ -507,6 +515,24 @@ function Meta({ label, value, mono, icon }: { label: string; value: string; mono
         {icon}
         <span className="truncate">{value}</span>
       </div>
+    </div>
+  );
+}
+
+function SkillMeta({ label, value, onClick }: { label: string; value: string; onClick?: () => void }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-slate-400 dark:text-slate-500 uppercase tracking-wide" style={{ fontSize: 10 }}>{label}</div>
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex items-center gap-1 max-w-full truncate text-slate-700 dark:text-slate-300 font-mono hover:text-indigo-700"
+        style={{ fontSize: 12 }}
+        title="Open skill and system prompt editor"
+      >
+        <FileText className="size-3 shrink-0" />
+        <span className="truncate">{value}</span>
+      </button>
     </div>
   );
 }
@@ -685,6 +711,127 @@ function ResourcePanel({
             <MiniField label="executable QA" value={health?.executable_qa_enabled ? "enabled" : "disabled"} />
             <MiniField label="windows sandbox" value={health?.codex_child_windows_sandbox || "--"} />
           </ResourceSection>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PromptEditorPanel({
+  agent,
+  promptConfig,
+  presets,
+  loading,
+  saving,
+  error,
+  width,
+  activeTab,
+  onTabChange,
+  onWidthChange,
+  onChange,
+  onApplyPreset,
+  onSave,
+  onReset,
+  onClose,
+}: {
+  agent: Agent;
+  promptConfig: AgentPromptConfig | null;
+  presets: PromptPresetInfo[];
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  width: number;
+  activeTab: "skill" | "system" | "preview";
+  onTabChange: (tab: "skill" | "system" | "preview") => void;
+  onWidthChange: (value: number) => void;
+  onChange: (patch: Partial<AgentPromptConfig>) => void;
+  onApplyPreset: (preset: PromptPresetInfo) => void;
+  onSave: () => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const qaPresets = presets.filter((preset) => preset.id.includes("qa"));
+  const textValue =
+    activeTab === "system"
+      ? promptConfig?.system_prompt || ""
+      : activeTab === "preview"
+        ? promptConfig?.effective_prompt_preview || ""
+        : promptConfig?.skill_markdown || "";
+  return (
+    <div className="absolute inset-0 z-30 bg-slate-950/20 backdrop-blur-[1px] flex justify-end">
+      <section
+        className="h-full border-l border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-[-12px_0_32px_rgba(15,23,42,0.14)] flex flex-col"
+        style={{ width: `${width}vw`, minWidth: 520, maxWidth: "72vw" }}
+      >
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-slate-900 dark:text-slate-100" style={{ fontSize: 14 }}>{agent.name} Prompt</div>
+            <div className="text-slate-500 dark:text-slate-500 truncate" style={{ fontSize: 11 }}>
+              Skill, guideline, and system prompt used by this agent. Saved prompts are snapshotted into each run.
+            </div>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={onReset} disabled={saving || loading} className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 disabled:opacity-50" style={{ fontSize: 12 }}>Reset</button>
+            <button onClick={onSave} disabled={saving || loading || !promptConfig} className="px-2 py-1 rounded border border-indigo-200 bg-indigo-600 text-white disabled:opacity-50" style={{ fontSize: 12 }}>
+              {saving ? "Saving" : "Save"}
+            </button>
+            <button onClick={onClose} className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400" style={{ fontSize: 12 }}>Close</button>
+          </div>
+        </div>
+        <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-1">
+            {(["skill", "system", "preview"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => onTabChange(tab)}
+                className={`px-2 py-1 rounded border ${activeTab === tab ? "bg-indigo-600 text-white border-indigo-600" : "bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700"}`}
+                style={{ fontSize: 12 }}
+              >
+                {tab === "skill" ? "Skill / Guideline" : tab === "system" ? "System Prompt" : "Effective Preview"}
+              </button>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>
+            width
+            <input type="range" min={42} max={68} value={width} onChange={(event) => onWidthChange(Number(event.target.value))} />
+          </label>
+        </div>
+        <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
+          <span className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>Preset</span>
+          <select
+            value={promptConfig?.preset || ""}
+            onChange={(event) => {
+              const preset = qaPresets.find((item) => item.id === event.target.value);
+              if (preset) onApplyPreset(preset);
+            }}
+            className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-slate-700 dark:text-slate-300"
+            style={{ fontSize: 12 }}
+          >
+            {qaPresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>{preset.label}</option>
+            ))}
+          </select>
+          <span className="text-slate-400 dark:text-slate-500 truncate" style={{ fontSize: 11 }}>
+            {qaPresets.find((preset) => preset.id === promptConfig?.preset)?.description || "Custom prompt"}
+          </span>
+        </div>
+        <div className="flex-1 min-h-0 p-4">
+          {error && <div className="mb-2 rounded border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2" style={{ fontSize: 12 }}>{error}</div>}
+          {loading ? (
+            <div className="h-full rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 flex items-center justify-center text-slate-500" style={{ fontSize: 13 }}>Loading prompt...</div>
+          ) : (
+            <textarea
+              value={textValue}
+              readOnly={activeTab === "preview"}
+              onChange={(event) =>
+                activeTab === "system"
+                  ? onChange({ system_prompt: event.target.value })
+                  : onChange({ skill_markdown: event.target.value })
+              }
+              className="h-full w-full resize-none rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 font-mono text-slate-800 dark:text-slate-200 outline-none focus:border-indigo-300"
+              style={{ fontSize: 12, lineHeight: 1.55 }}
+            />
+          )}
         </div>
       </section>
     </div>
@@ -1017,6 +1164,14 @@ export function AgentRosterPage({
   const [manualStageOrder, setManualStageOrder] = useState<ManualStageId[]>(DEFAULT_MANUAL_STAGE_ORDER);
   const [draggedStageId, setDraggedStageId] = useState<ManualStageId | null>(null);
   const [forcedEnabledAgentIds, setForcedEnabledAgentIds] = useState<Set<string>>(() => new Set());
+  const [promptPanelAgentId, setPromptPanelAgentId] = useState<string | null>(null);
+  const [promptConfig, setPromptConfig] = useState<AgentPromptConfig | null>(null);
+  const [promptPresets, setPromptPresets] = useState<PromptPresetInfo[]>([]);
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [promptTab, setPromptTab] = useState<"skill" | "system" | "preview">("skill");
+  const [promptPanelWidth, setPromptPanelWidth] = useState(52);
   const accountOptions = useMemo(() => codexAccountOptions(config), [config]);
   const selectedAccountLabel = accountLabelForValue(accountOptions, selectedAccountHome);
   const modelOptions = codexModels?.models || [];
@@ -1119,6 +1274,8 @@ export function AgentRosterPage({
   );
   const manualGraph = useMemo(() => deriveManualWorkflowGraph(agents, manualStageOrder), [agents, manualStageOrder]);
   const graphWarnings = manualGraph.warnings;
+  const selectedPromptAgent = promptPanelAgentId ? agents.find((agent) => agent.id === promptPanelAgentId) || null : null;
+  const llmQaEnabled = runMode === "manual" ? manualCounts.qaAgentCount > 0 : runMode !== "fast" && (config?.defaults.qa_agent_count || 0) > 0;
 
   useEffect(() => {
     if (!selectedModel && config?.defaults.model) {
@@ -1193,6 +1350,34 @@ export function AgentRosterPage({
     }
   }, [resourcesOpen]);
 
+  useEffect(() => {
+    if (!promptPanelAgentId) {
+      return;
+    }
+    let cancelled = false;
+    setPromptLoading(true);
+    setPromptError(null);
+    Promise.all([loadAgentPrompt(promptPanelAgentId), loadPromptCatalog()])
+      .then(([agentPrompt, catalog]) => {
+        if (cancelled) return;
+        setPromptConfig(agentPrompt);
+        setPromptPresets(catalog.presets);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPromptError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPromptLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [promptPanelAgentId]);
+
   function updateAgentConfig(agent: Agent, patch: Partial<AgentProviderConfig>) {
     setAgentOverrides((current) => ({
       ...current,
@@ -1224,6 +1409,66 @@ export function AgentRosterPage({
       setSettingsMessage(t("프리셋 저장 완료", "Preset saved"));
     } catch (err) {
       setSettingsMessage(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function openPromptEditor(agentId: string) {
+    setPromptPanelAgentId(agentId);
+    setPromptTab("skill");
+  }
+
+  function updatePromptConfig(patch: Partial<AgentPromptConfig>) {
+    setPromptConfig((current) => {
+      if (!current) return current;
+      const next = { ...current, ...patch };
+      next.effective_prompt_preview = [
+        next.system_prompt?.trim() ? `System prompt override:\n${next.system_prompt.trim()}` : "",
+        next.skill_markdown?.trim() ? `Skill / guideline:\n${next.skill_markdown.trim()}` : "",
+      ].filter(Boolean).join("\n\n");
+      return next;
+    });
+  }
+
+  function applyPromptPreset(preset: PromptPresetInfo) {
+    updatePromptConfig({
+      preset: preset.id,
+      skill_markdown: preset.skill_markdown,
+      system_prompt: preset.system_prompt,
+    });
+  }
+
+  async function handleSaveAgentPrompt() {
+    if (!promptConfig) return;
+    setPromptSaving(true);
+    setPromptError(null);
+    try {
+      const saved = await saveAgentPrompt(promptConfig.agent_id, {
+        agent_id: promptConfig.agent_id,
+        preset: promptConfig.preset || null,
+        skill_markdown: promptConfig.skill_markdown,
+        system_prompt: promptConfig.system_prompt,
+      });
+      setPromptConfig(saved);
+      setSettingsMessage(t("프롬프트 저장 완료", "Prompt saved"));
+    } catch (err) {
+      setPromptError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPromptSaving(false);
+    }
+  }
+
+  async function handleResetAgentPrompt() {
+    if (!promptConfig) return;
+    setPromptSaving(true);
+    setPromptError(null);
+    try {
+      const reset = await resetAgentPrompt(promptConfig.agent_id);
+      setPromptConfig(reset);
+      setSettingsMessage(t("프롬프트 초기화 완료", "Prompt reset"));
+    } catch (err) {
+      setPromptError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPromptSaving(false);
     }
   }
 
@@ -1471,6 +1716,9 @@ export function AgentRosterPage({
                 </Pill>
               ))}
             </div>
+            <div className={`rounded-md border px-2 py-1.5 ${llmQaEnabled ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-600"}`} style={{ fontSize: 11 }}>
+              QA route: {llmQaEnabled ? "LLM QA Agent enabled" : "mechanical QA only"}
+            </div>
           </SidebarSection>
           <SidebarSection title={t("기본값", "Defaults")}>
             <SelectField
@@ -1577,6 +1825,7 @@ export function AgentRosterPage({
                 onConfigChange={(patch) => updateAgentConfig(agent, patch)}
                 onToggle={() => toggleAgent(agent.id)}
                 onDelete={() => deleteAgent(agent.id)}
+                onEditPrompt={() => openPromptEditor(agent.id)}
               />
             ))}
             <button
@@ -1661,6 +1910,29 @@ export function AgentRosterPage({
           error={resourceError}
           onRefresh={loadResources}
           onClose={() => setResourcesOpen(false)}
+        />
+      )}
+      {selectedPromptAgent && (
+        <PromptEditorPanel
+          agent={selectedPromptAgent}
+          promptConfig={promptConfig}
+          presets={promptPresets}
+          loading={promptLoading}
+          saving={promptSaving}
+          error={promptError}
+          width={promptPanelWidth}
+          activeTab={promptTab}
+          onTabChange={setPromptTab}
+          onWidthChange={setPromptPanelWidth}
+          onChange={updatePromptConfig}
+          onApplyPreset={applyPromptPreset}
+          onSave={handleSaveAgentPrompt}
+          onReset={handleResetAgentPrompt}
+          onClose={() => {
+            setPromptPanelAgentId(null);
+            setPromptConfig(null);
+            setPromptError(null);
+          }}
         />
       )}
     </div>

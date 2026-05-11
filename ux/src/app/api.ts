@@ -106,6 +106,38 @@ export type LocalAppSettings = {
   agent_configs: AgentProviderConfig[];
 };
 
+export type AgentPromptConfig = {
+  agent_id: string;
+  display_name: string;
+  role: string;
+  preset?: string | null;
+  default_skill_markdown: string;
+  skill_markdown: string;
+  default_system_prompt: string;
+  system_prompt: string;
+  effective_prompt_preview: string;
+  saved: boolean;
+};
+
+export type AgentPromptSaveInput = {
+  agent_id: string;
+  preset?: string | null;
+  skill_markdown: string;
+  system_prompt: string;
+};
+
+export type PromptPresetInfo = {
+  id: string;
+  label: string;
+  description: string;
+  skill_markdown: string;
+  system_prompt: string;
+};
+
+export type PromptCatalog = {
+  presets: PromptPresetInfo[];
+};
+
 export type WorkflowStage = {
   id: string;
   type: "planning" | "approval" | "contract" | "scaffold" | "code" | "integration" | "qa" | "fix";
@@ -343,6 +375,27 @@ export function saveSettings(settings: LocalAppSettings): Promise<LocalAppSettin
   return apiFetch<LocalAppSettings>("/settings", {
     method: "PUT",
     body: JSON.stringify(settings),
+  });
+}
+
+export function loadPromptCatalog(): Promise<PromptCatalog> {
+  return apiFetch<PromptCatalog>("/prompts");
+}
+
+export function loadAgentPrompt(agentId: string): Promise<AgentPromptConfig> {
+  return apiFetch<AgentPromptConfig>(`/prompts/${encodeURIComponent(agentId)}`);
+}
+
+export function saveAgentPrompt(agentId: string, input: AgentPromptSaveInput): Promise<AgentPromptConfig> {
+  return apiFetch<AgentPromptConfig>(`/prompts/${encodeURIComponent(agentId)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function resetAgentPrompt(agentId: string): Promise<AgentPromptConfig> {
+  return apiFetch<AgentPromptConfig>(`/prompts/${encodeURIComponent(agentId)}/reset`, {
+    method: "POST",
   });
 }
 

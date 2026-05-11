@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app_services import (
     ActiveStepInfo,
+    AgentPromptConfig,
+    AgentPromptOverride,
     ArtifactContent,
     ArtifactInfo,
     ArtifactService,
@@ -22,6 +24,8 @@ from app_services import (
     LogTail,
     ObservationService,
     OperatorActionRequest,
+    PromptCatalog,
+    PromptService,
     ProviderCliStatus,
     ProviderModelCatalog,
     ProviderService,
@@ -50,6 +54,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     config_service = ConfigService(root)
     provider_service = ProviderService(root)
     settings_service = SettingsService(root)
+    prompt_service = PromptService(root)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -76,7 +81,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "tauri://localhost",
         ],
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["*"],
     )
 
@@ -95,6 +100,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.put("/settings", response_model=LocalAppSettings)
     def save_settings(payload: LocalAppSettings) -> LocalAppSettings:
         return settings_service.save_settings(payload)
+
+    @app.get("/prompts", response_model=PromptCatalog)
+    def prompt_catalog() -> PromptCatalog:
+        return prompt_service.catalog()
+
+    @app.get("/prompts/{agent_id}", response_model=AgentPromptConfig)
+    def get_prompt(agent_id: str) -> AgentPromptConfig:
+        return prompt_service.get_prompt(agent_id)
+
+    @app.put("/prompts/{agent_id}", response_model=AgentPromptConfig)
+    def save_prompt(agent_id: str, payload: AgentPromptOverride) -> AgentPromptConfig:
+        if payload.agent_id != agent_id:
+            raise HTTPException(status_code=400, detail="payload agent_id must match path")
+        return prompt_service.save_prompt(payload)
+
+    @app.post("/prompts/{agent_id}/reset", response_model=AgentPromptConfig)
+    def reset_prompt(agent_id: str) -> AgentPromptConfig:
+        return prompt_service.reset_prompt(agent_id)
 
     @app.get("/providers", response_model=list[ProviderCliStatus])
     def providers() -> list[ProviderCliStatus]:

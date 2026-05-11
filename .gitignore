@@ -20,6 +20,7 @@ env/
 # Generated agent run artifacts
 runs/
 local_app_settings.json
+local_prompt_overrides.json
 reference_packs/gstack_src/
 reference_packs/karpathy_src/
 

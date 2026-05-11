@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app_services import (
     AgentProviderConfig,
+    AgentPromptOverride,
     ArtifactService,
     ConfigService,
     EventService,
@@ -21,6 +22,7 @@ from app_services import (
     ObservationService,
     OperatorActionRequest,
     ProviderService,
+    PromptService,
     RunCreateRequest,
     RunService,
     SettingsService,
@@ -109,6 +111,45 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(dashboard_config["codex_homes"]["qa_agents"], [codex_home])
         self.assertEqual(dashboard_config["agent_configs"]["planner_a"]["model"], "gpt-5.4")
         self.assertEqual(dashboard_config["agent_configs"]["planner_a"]["reasoning_effort"], "xhigh")
+
+    def test_prompt_service_default_qa_and_save_override(self) -> None:
+        service = PromptService(self.project_root)
+        prompt = service.get_prompt("qa_1")
+
+        self.assertEqual(prompt.preset, "default_qa")
+        self.assertIn("mechanical QA", prompt.skill_markdown)
+        self.assertIn("System prompt override", prompt.effective_prompt_preview)
+
+        saved = service.save_prompt(
+            AgentPromptOverride(
+                agent_id="qa_1",
+                preset="ethics_bias_qa",
+                skill_markdown="Ethics rubric",
+                system_prompt="Ethics system",
+            )
+        )
+
+        self.assertTrue(saved.saved)
+        self.assertEqual(saved.skill_markdown, "Ethics rubric")
+        self.assertIn("Ethics system", saved.effective_prompt_preview)
+
+    def test_create_run_snapshots_qa_prompt_overrides(self) -> None:
+        PromptService(self.project_root).save_prompt(
+            AgentPromptOverride(
+                agent_id="qa_1",
+                preset="strict_safety_qa",
+                skill_markdown="Strict QA rubric",
+                system_prompt="Strict QA system",
+            )
+        )
+        detail = RunService(self.project_root).create_run(
+            RunCreateRequest(user_request="Build an app", routing_mode="balanced", qa_agent_count=1)
+        )
+        created_dir = self.project_root / "runs" / detail.run_id
+
+        self.assertIn("qa_1", detail.state["prompt_snapshots"])
+        self.assertTrue((created_dir / "prompts" / "qa_1_skill.md").exists())
+        self.assertEqual(detail.state["dashboard_config"]["prompt_overrides"]["qa_1"]["skill_markdown"], "Strict QA rubric")
 
     def test_settings_service_round_trips_agent_configs(self) -> None:
         service = SettingsService(self.project_root)
