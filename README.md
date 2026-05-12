@@ -19,7 +19,7 @@ Orchestra는 사용자가 자연어로 앱/기능 개발을 요청하면 여러 
   - 중지
 - Codex 계정, 모델, reasoning effort GUI 선택
 - Codex 5시간/주간 사용량 GUI 표시
-- manual 모드에서 에이전트 추가 및 workflow graph 편집
+- manual 모드에서 에이전트 추가 및 제한된 workflow graph 편집
 - mechanical QA
   - syntax check
   - generated app 실행 probe
@@ -42,11 +42,14 @@ Orchestra는 사용자가 자연어로 앱/기능 개발을 요청하면 여러 
 
 ### 필수
 
-- Windows 10/11
 - Python 3.10 이상
 - Node.js / npm
 - Codex CLI 설치 및 로그인
 - Git
+
+현재 실행 문서는 Windows/PowerShell 기준으로 작성되어 있습니다. FastAPI와
+React/Tauri 개발 실행 자체는 macOS에서도 동작할 수 있지만, Windows installer
+패키징은 별도 smoke test가 필요합니다.
 
 ### 데스크톱 앱 개발 실행에 필요
 
@@ -138,12 +141,15 @@ http://127.0.0.1:5173
    - `fast`: 빠른 단일 구현, mechanical QA 중심
    - `balanced`: Planner A/B + Code Agent + mechanical QA + LLM QA 가능
    - `parallel`: 계약/스캐폴드/병렬 Code Agent/Integrator/QA
-   - `manual`: 에이전트와 workflow graph를 직접 구성
+   - `manual`: 에이전트와 제한된 workflow graph를 직접 구성
 3. Codex account/model/reasoning을 선택합니다.
 4. 아래 입력창에 만들 앱이나 기능을 설명합니다.
 5. `실행 시작`을 누릅니다.
 6. Planner 결과를 확인하고 승인합니다.
-7. 구현과 QA가 끝나면 QA 결과를 승인하거나 수정 요청합니다.
+7. 구현과 QA가 끝나면 QA 결과를 승인하거나 수정 요청을 기록합니다.
+
+현재 QA 수정 요청은 operator feedback으로 기록되지만, 별도 worker continuation
+으로 자동 재실행되지는 않습니다. 재실행 연결은 다음 hardening 항목입니다.
 
 ## LLM QA Agent 시연 방법
 
@@ -287,7 +293,7 @@ npm run tauri:build
 app_services.py              FastAPI와 GUI가 공유하는 서비스 계층
 local_api.py                 localhost FastAPI adapter
 run_worker.py                background run worker
-workflow_engine.py           route/manual graph 실행 엔진
+workflow_engine.py           route/constrained manual graph 실행 엔진
 local_dashboard_runner.py    실제 agent stage 실행 helper
 agents.py                    Planner/Code/Integrator/QA agent prompt 정의
 executable_qa.py             앱 실행 probe, screenshot, browser QA

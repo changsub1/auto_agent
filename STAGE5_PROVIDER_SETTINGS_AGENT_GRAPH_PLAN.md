@@ -291,10 +291,11 @@ count-based shortcut.
 
 Detailed implementation plan: see `STAGE5C_MANUAL_AGENT_GRAPH_PLAN.md`.
 
-The current manual mode is limited.  It lets the UI add/remove agent cards and
-passes active role counts into `POST /runs`.  If more than one code agent is
-active, routing currently resolves to the existing parallel route.  That is
-useful, but it is not a freeform manual workflow.
+As of version 10, manual mode has moved beyond role counts. The UI derives and
+edits a workflow graph from stage cards, sends `workflow_graph` to `POST /runs`,
+and the backend validates/stores it. Execution is still intentionally
+constrained: supported graph shapes map onto the existing single-code or
+parallel-code workflow paths. It is not yet a freeform arbitrary-DAG runtime.
 
 ### Graph Model
 

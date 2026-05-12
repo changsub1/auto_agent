@@ -6,9 +6,10 @@ This repository is a local Codex CLI multi-agent development automation MVP.
 It verifies that a Python orchestrator can call the locally logged-in Codex CLI
 instead of using an OpenAI API key or OpenAI SDK directly.
 
-The current system can receive a development request, let multiple Codex-backed
-agents discuss the plan, ask a human for approval in Discord, and then generate
-a runnable local app.
+The current system can receive a development request through the desktop app or
+the Discord adapter, let multiple Codex-backed agents plan the work, ask a human
+for approval, and then generate and QA a runnable local app through the
+FastAPI-run-worker path.
 
 As of 2026-04-29, the product direction is a local Tauri desktop app with a
 localhost-only FastAPI sidecar. Discord should become a lightweight remote
@@ -19,11 +20,11 @@ The next work should finish the app surface, package it as a local desktop app,
 and dogfood it on real personal development requests before final cleanup.
 The detailed plan is in `STAGE4_APP_COMPLETION_PACKAGING_PLAN.md`.
 
-As of version 8, Stage 4A and Stage 4B are usable for dogfooding: the Tauri
+As of version 10, Stage 4A and Stage 4B are usable for dogfooding: the Tauri
 desktop app starts the local FastAPI sidecar, runs through plan approval,
-implementation, mechanical QA, and QA approval, and shows a cleaner
-agent-output-focused run timeline. Windows installer packaging remains the main
-Stage 4C gap.
+implementation, mechanical QA, optional LLM QA, and QA approval, and shows a
+cleaner agent-output-focused run timeline. Windows installer packaging remains
+the main Stage 4C gap.
 
 Stage 5 should move terminal-based setup and routing controls into the GUI:
 provider login/status, model and reasoning dropdowns, usage limits, Discord bot
@@ -35,11 +36,18 @@ Codex login status, Codex model catalog data, runtime health, and Codex 5-hour
 and weekly usage limits through `codex app-server account/rateLimits/read`; the
 React `Resources` panel displays those values.
 
-Stage 5B-1 is implemented as a global default selector MVP: the roster sidebar
-now lets the user choose Codex account, model, and reasoning level from
-dropdowns, shows those choices on agent cards, and sends them into run creation
-so `dashboard_config` records the selected model, reasoning effort, and Codex
-home.
+Stage 5B is implemented as a desktop settings slice: the roster sidebar lets
+the user choose global Codex account/model/reasoning defaults, override
+account/model/reasoning per Codex agent card, persist those choices through
+`local_app_settings.json`, and send exact `agent_configs` into run creation.
+The workflow runner prefers those per-agent settings when launching Codex and
+recording resumed sessions.
+
+Stage 5C is implemented as a constrained manual graph MVP. Manual mode now
+derives and edits a workflow graph from enabled stage cards, validates/stores it
+as `workflow.graph` plus `workflow_graph.json`, and maps supported graph shapes
+onto the existing single-code or parallel-code workflow paths. It is not yet a
+general arbitrary-DAG executor.
 
 Stage 5G-1 is implemented for the course-submission path: the desktop roster
 now shows whether the selected route will run an LLM QA Agent or only
@@ -47,6 +55,13 @@ mechanical QA, each agent's skill row opens a large right-side Prompt Editor,
 QA guideline presets are editable, and run creation snapshots the prompts used
 under `prompts/`. Saved QA prompts are passed into the Codex-backed QA Agent
 review prompt.
+
+Stage 6 planning is documented in
+`STAGE6_PROMPT_SKILL_CONFIGURATION_PLAN.md`. The target is to move hard-coded
+agent role prompts into editable System Prompt templates, keep skills as
+separate per-agent guidance, render exact final prompts for debugging, and keep
+the run timeline focused on concise input summaries, skill names, outputs, and
+artifacts.
 
 ## Phase 1: Implemented
 
@@ -198,7 +213,7 @@ Completed so far:
   directly in the timeline.
 - The latest checked validation passed:
   - `python -m py_compile app_services.py state_store.py tests\test_app_services.py`
-  - `python -m unittest discover -s tests` (38 tests)
+  - `python -m unittest discover -s tests`
   - `npm run build` from `ux/`
   - `cargo check` from `ux/src-tauri/`
 
@@ -214,9 +229,9 @@ Still partial:
 - QA approve is connected and moves `awaiting_qa_approval` to `completed`.
   Operator-requested QA fixes after that checkpoint are still recorded but not
   yet re-enqueued as a separate worker continuation.
-- Manual mode agent cards currently affect supported role counts. They are not
-  yet a full agent registry with per-agent prompts, models, accounts, and
-  execution ownership.
+- Manual mode now supports per-agent Codex account/model/reasoning settings,
+  prompt snapshots, and constrained workflow graph editing. It is still not a
+  fully provider-agnostic arbitrary agent registry or arbitrary-DAG executor.
 - Tauri dev-mode app execution is verified, including sidecar startup. Windows
   installer packaging is not yet smoke-tested.
 - The Python sidecar packaging strategy is still undecided for distributable
@@ -337,7 +352,13 @@ Complete the product in this order:
    - Per-agent account/model/reasoning selection.
    - Real manual-mode agent registry.
    - Better run history and status filtering.
-7. Move provider setup and manual graph control into the desktop app.
+7. Implement Stage 6 prompt and skill configuration.
+   - Move hard-coded agent prompts into editable System Prompt templates.
+   - Keep Code Agents general by default and specialize through assignments or
+     optional skills.
+   - Add final prompt preview and prompt artifacts without cluttering the
+     default timeline.
+8. Move remaining provider setup and manual graph control into the desktop app.
    - Codex/Claude install and login status.
    - Model and reasoning dropdowns from provider catalogs.
    - Usage limit display where available.
@@ -478,7 +499,9 @@ Implementation notes:
 
 ## Phase 3: Parallel Agent Workflow
 
-Detailed design is tracked in `PARALLEL_AGENT_PLAN.md`.
+The original parallel-agent design has been folded into the implemented
+contract/scaffold/code/integrator workflow and the Stage 3/Stage 5C planning
+documents.
 
 ### Contract-first Parallel Development
 
@@ -532,8 +555,8 @@ Detailed design is tracked in `PARALLEL_AGENT_PLAN.md`.
 ### Dashboard Direction
 
 - Discord becomes a message integration and mobile approval/feedback channel.
-- A web dashboard becomes the primary control surface after the core workflow is
-  stable.
+- The React/Tauri desktop app becomes the primary control surface after the
+  core workflow is stable.
 - Dashboard controls should include agent counts, account pool, model selection,
   reasoning effort, prompt overrides, task assignment, run graph, logs, and
   artifact review.
@@ -593,7 +616,8 @@ Do not commit:
 - Codex auth/cache directories
 
 Use `.gitignore` to keep generated run artifacts and local caches out of Git.
-# Stage 5B Status Update
+
+## Stage 5B/5C/5G Status Update
 
 - Stage 5B is implemented as the current desktop settings slice. The roster can
   select global Codex defaults, override account/model/reasoning per Codex
@@ -601,19 +625,20 @@ Use `.gitignore` to keep generated run artifacts and local caches out of Git.
   exact `agent_configs` into run creation.
 - The workflow runner now prefers per-agent settings when launching Codex and
   recording resumed sessions.
-- Remaining Stage 5 work is the larger product layer: manual graph execution
-  (Stage 5C), Discord bot supervisor controls, diagnostics/setup assistant, and
+- Remaining Stage 5 work is the larger product layer: richer manual graph
+  hardening, Discord bot supervisor controls, diagnostics/setup assistant, and
   packaged-app follow-up.
 - Stage 5C planning is documented in `STAGE5C_MANUAL_AGENT_GRAPH_PLAN.md`.
 - Stage 5C-1 is implemented: manual mode now derives a workflow graph from the
   enabled agent cards, previews it in the roster, sends it on run creation, and
   the backend validates/stores it as `workflow.graph` plus
-  `workflow_graph.json`. Actual graph-based execution is still Stage 5C-2.
+  `workflow_graph.json`.
 - Stage 5C-2 is implemented as a constrained execution MVP: manual
   `workflow.graph` now drives development route capabilities/counts, single-code
   graphs use the single-code path, parallel-code graphs with integration use the
   existing contract/scaffold/parallel/integration path, and graph boundary
-  events are emitted. Full drag/reorder editing remains Stage 5C-3.
+  events are emitted. This is still a supported-shape executor, not a general
+  arbitrary-DAG runtime.
 - Stage 5C-3 is implemented as a stage-card graph editor: manual stage cards
   show assigned agents such as `Code Agent 1 + Code Agent 2`, mark parallel
   stages explicitly, can be reordered by drag/drop or arrow controls,
