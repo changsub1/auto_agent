@@ -1,652 +1,166 @@
 # Project Status
 
-## Purpose
+최종 갱신: 2026-05-14
 
-This repository is a local Codex CLI multi-agent development automation MVP.
-It verifies that a Python orchestrator can call the locally logged-in Codex CLI
-instead of using an OpenAI API key or OpenAI SDK directly.
+## 요약
 
-The current system can receive a development request through the desktop app or
-the Discord adapter, let multiple Codex-backed agents plan the work, ask a human
-for approval, and then generate and QA a runnable local app through the
-FastAPI-run-worker path.
+Orchestra는 로컬 Codex CLI를 멀티 에이전트처럼 호출해 기획, 구현, QA, 사용자 승인을 진행하는 Tauri 데스크톱 앱입니다. 현재 제출용 MVP는 Codex CLI 중심으로 동작하며, API key provider는 후순위 확장 항목입니다.
 
-As of 2026-04-29, the product direction is a local Tauri desktop app with a
-localhost-only FastAPI sidecar. Discord should become a lightweight remote
-control and notification adapter, not the owner of the main workflow.
+## 제품 방향
 
-As of Stage 3 closeout, the architecture migration is considered MVP-complete.
-The next work should finish the app surface, package it as a local desktop app,
-and dogfood it on real personal development requests before final cleanup.
-The detailed plan is in `STAGE4_APP_COMPLETION_PACKAGING_PLAN.md`.
+- 개인 사용자용 로컬 데스크톱 앱
+- 사용자가 로그인한 Codex CLI 구독 환경 활용
+- localhost FastAPI sidecar + React/Tauri UI
+- Discord bot 경로는 보조/레거시 경로로 유지
+- 과제 관점에서는 프롬프트 엔지니어링, 멀티 에이전트 역할 분리, QA guideline, evidence 기반 판단을 강조
 
-As of version 10, Stage 4A and Stage 4B are usable for dogfooding: the Tauri
-desktop app starts the local FastAPI sidecar, runs through plan approval,
-implementation, mechanical QA, optional LLM QA, and QA approval, and shows a
-cleaner agent-output-focused run timeline. Windows installer packaging remains
-the main Stage 4C gap.
+## 주요 기능
 
-Stage 5 should move terminal-based setup and routing controls into the GUI:
-provider login/status, model and reasoning dropdowns, usage limits, Discord bot
-control, diagnostics, and a real manual agent graph builder.  The detailed plan
-is in `STAGE5_PROVIDER_SETTINGS_AGENT_GRAPH_PLAN.md`.
+- 실행 모드
+  - `fast`: 빠른 단일 Code Agent 구현, mechanical QA 중심
+  - `balanced`: Planner A/B, Code Agent, QA Workspace Agent
+  - `parallel`: 계약, 스캐폴드, 복수 Code Agent, Integrator, QA
+  - `manual`: 사용자가 에이전트와 워크플로 그래프를 직접 구성
+- GUI 설정
+  - Codex 계정 선택
+  - 모델 선택
+  - reasoning effort 선택
+  - Codex 5시간/주간 사용량 표시
+  - agent별 계정/모델/reasoning override
+- Prompt/Skill 설정
+  - `agent_prompts/` 기반 System Prompt 템플릿
+  - GUI에서 agent별 System Prompt 수정 가능
+  - Skill / Guideline과 System Prompt 분리
+  - Code Agent 기본 skill은 Karpathy Guidelines
+  - ciembor agent-rules-books mini/nano 선택 가능
+  - run 시작 시 prompt snapshot 저장
+- Human-in-the-loop
+  - Planner 결과 승인
+  - 변경 요청
+  - QA 결과 승인
+  - QA 수정 요청 기록
+  - 중지
+- QA
+  - balanced/manual에서 QA Agent가 있으면 QA Workspace Agent 직접 실행
+  - `qa_workspace/app`에 산출물 복사
+  - `qa_workspace/qa_tools`에 command/file/browser probe 도구 복사
+  - `qa_tools\*.cmd` launcher로 Orchestra Python/.venv 환경에서 QA 도구 실행
+  - QA Agent가 필요한 도구를 선택해 evidence 수집
+  - browser/canvas 앱은 action file 기반 page-scoped drag/click/screenshot 검증 가능
+  - `evidence/verdict.json`, `evidence/qa_findings.md`, `evidence/command_log.jsonl` 강제
+  - visual/browser app은 screenshot evidence 없이 PASS 불가
+  - desktop GUI는 기본적으로 OS-wide mouse/keyboard automation 비활성화
+- Run Monitor
+  - 타임라인을 agent output, approval, error 중심으로 정리
+  - 승인 버튼을 관련 결과 카드 안에 표시
+  - QA evidence를 타임라인 카드에서 직접 확인
+  - 우측 패널은 선택 이벤트 상세와 파일 preview 중심
 
-The first Stage 5A slice is implemented: the local API exposes provider health,
-Codex login status, Codex model catalog data, runtime health, and Codex 5-hour
-and weekly usage limits through `codex app-server account/rateLimits/read`; the
-React `Resources` panel displays those values.
+## Stage별 상태
 
-Stage 5B is implemented as a desktop settings slice: the roster sidebar lets
-the user choose global Codex account/model/reasoning defaults, override
-account/model/reasoning per Codex agent card, persist those choices through
-`local_app_settings.json`, and send exact `agent_configs` into run creation.
-The workflow runner prefers those per-agent settings when launching Codex and
-recording resumed sessions.
+### Stage 3
 
-Stage 5C is implemented as a constrained manual graph MVP. Manual mode now
-derives and edits a workflow graph from enabled stage cards, validates/stores it
-as `workflow.graph` plus `workflow_graph.json`, and maps supported graph shapes
-onto the existing single-code or parallel-code workflow paths. It is not yet a
-general arbitrary-DAG executor.
+FastAPI run worker 기반 전체 workflow MVP가 완료되었습니다. 기존 Discord-owned flow는 보조 경로로 남았고, 주 실행 경로는 로컬 API입니다.
 
-Stage 5G-1 is implemented for the course-submission path: the desktop roster
-now shows whether the selected route will run an LLM QA Agent or only
-mechanical QA, each agent's skill row opens a large right-side Prompt Editor,
-QA guideline presets are editable, and run creation snapshots the prompts used
-under `prompts/`. Saved QA prompts are passed into the Codex-backed QA Agent
-review prompt.
+### Stage 4
 
-Stage 6 planning is documented in
-`STAGE6_PROMPT_SKILL_CONFIGURATION_PLAN.md`. The target is to move hard-coded
-agent role prompts into editable System Prompt templates, keep skills as
-separate per-agent guidance, render exact final prompts for debugging, and keep
-the run timeline focused on concise input summaries, skill names, outputs, and
-artifacts.
+Tauri 데스크톱 앱이 FastAPI sidecar를 실행하고 React UI와 연결합니다. Windows installer 패키징은 후순위이지만 dev 실행은 가능합니다.
 
-## Phase 1: Implemented
+### Stage 5
 
-### Local Codex CLI Integration
+GUI 설정과 manual graph MVP가 구현되었습니다.
 
-- Python calls the local `codex` CLI with `subprocess.run`.
-- Prompts are passed through stdin using `codex exec ... -`.
-- Shell interpolation is not used.
-- Windows Codex launchers such as `codex.cmd` are resolved.
-- UTF-8 output handling is configured for Windows.
-- Codex calls use:
+- provider health/status
+- Codex 모델/reasoning 설정
+- Codex 사용량 표시
+- per-agent provider config
+- manual 모드 agent 추가/삭제/비활성화
+- 제한된 workflow graph 저장/검증
 
-```text
-codex exec --skip-git-repo-check --sandbox workspace-write --color never -
-```
+### Stage 6
 
-### Original CLI MVP
+Prompt/Skill 설정 분리가 구현되었습니다.
 
-- `main.py` accepts a user request from the terminal.
-- Planner Agent creates a planning document.
-- Developer Agent generates an app under `runs/<timestamp>/generated_app`.
-- Mechanical QA runs language-neutral executable checks when a manifest or safe
-  adapter is available, with Python syntax checks kept as one adapter.
-- If mechanical QA fails, Developer Agent receives the error log and gets one or more fix attempts.
+- `agent_prompts/` 기반 System Prompt 템플릿
+- `prompt_templates.py` 로더
+- GUI Prompt Editor
+- Skill Registry
+- prompt snapshot
+- final prompt log artifact 저장
 
-### Discord Human-in-the-loop MVP
+### Stage 7
 
-- Discord bot entrypoint: `discord_bot.py`
-- Slash command: `/dev`
-- User can request a service/app from Discord.
-- Bot posts progress updates to the Discord channel while controlling runs
-  through the localhost FastAPI API.
-- FastAPI worker runs Planner Agent A, optional Planner Agent B, and Planner
-  Agent A finalization.
-- The parallel route creates a contract bundle and task manifest after plan
-  approval as part of the worker-owned implementation flow.
-- Discord buttons allow the requester to:
-  - Approve
-  - Request changes
-  - Cancel
-- If approved, Discord calls the API and the FastAPI worker continues the
-  selected route.
-- QA result, generated app path, and executable QA screenshots are read through
-  the API/artifact state and posted back to Discord when available.
-- After QA, Discord asks the requester to approve the result or record a fix
-  request.
-- Discord exposes read-only `/runs` and `/status` commands backed by the local
-  API. Status output includes active-step metadata and a short log tail from
-  Stage 3C observation endpoints.
-- A first routing core is implemented through `ROUTING_MODE` with `fast`,
-  `balanced`, `parallel`, and `manual` modes. The default is `balanced`. Fast
-  and balanced routes now use `CodeAgent(code_1)` directly instead of the
-  legacy `DeveloperAgent`.
+QA 구조와 Run Monitor 정리가 진행되었습니다.
 
-### Session and State Management
+- Stage7A: LLM QA scenario plan 기반 동적 QA 초안
+- Stage7B-1: UTF-8 subprocess/env hardening
+- Stage7B-2: 타임라인 action card로 승인 UI 이동
+- Stage7B-3: 타임라인 QA evidence preview 추가
+- Stage7B-4: 우측 패널 단순화
+- Stage7C: QA Workspace Agent 구현
+- Stage7D: scenario plan/mechanical QA 선행을 제거하고 QA Workspace Agent가 직접 evidence 도구를 선택하는 구조로 전환
 
-- Each run creates `runs/YYYYMMDD_HHMMSS`.
-- Run state is saved to `state.json`.
-- Events are appended to `events.jsonl`.
-- Human-readable progress is saved to `transcript.md`.
-- Planning artifacts are saved under `planning/`.
-- Raw Codex prompt/stdout/stderr/meta logs are saved under `logs/`.
-- Codex session IDs are parsed from CLI output and stored per agent.
-- Follow-up calls try to resume each agent session with:
+Stage7D 기준 QA 흐름:
 
 ```text
-codex exec resume <session_id> -
+Code 완료
+-> QA Workspace 생성
+-> generated_app 복사
+-> qa_tools 복사
+-> QA Agent가 command_probe/file_probe/browser_probe.cmd 선택 실행
+-> verdict.json, qa_findings.md, command_log.jsonl 작성
+-> hard policy 검증
+-> 사용자 QA 승인
 ```
 
-- If resume fails, the engine falls back to a fresh Codex call using the latest relevant artifact.
-- The full transcript is not resent on every turn.
-- Discord progress messages show a short agent session id and whether that call resumed an existing session.
+## 주요 파일
 
-### Current Main Files
+- `app_services.py`: UI-agnostic service layer
+- `local_api.py`: FastAPI API adapter
+- `run_worker.py`: background run worker
+- `workflow_engine.py`: route별 workflow 실행
+- `local_dashboard_runner.py`: agent stage 실행 함수
+- `agents.py`: Planner/Code/QA agent prompt 구성
+- `codex_runner.py`: Codex CLI subprocess wrapper
+- `qa_tools/`: QA Workspace Agent에게 제공되는 안전한 evidence 수집 도구
+- `executable_qa.py`: fast/no-LLM 경로에서 사용하는 manifest, Playwright, CLI 기반 mechanical QA
+- `qa.py`: QA result composition
+- `prompt_templates.py`: System Prompt template loader
+- `skill_registry.py`: Skill / Guideline catalog
+- `state_store.py`: run state, events, artifacts
+- `ux/`: React/Tauri UI
 
-- `main.py`: local CLI orchestrator
-- `app_services.py`: UI-agnostic local service layer for run/config/event/artifact/action access
-- `discord_api_client.py`: small localhost FastAPI client used by Discord
-- `discord_api_engine.py`: Discord presentation adapter over the local API
-- `local_api.py`: FastAPI adapter over the local service layer
-- `run_local_api.py`: localhost-only API server runner
-- `discord_bot.py`: Discord slash command entrypoint
-- `dashboard.py`: Streamlit local run control panel for planning/contract/scaffold tests
-- `debate_engine.py`: Planner A/B debate, contract approval, parallel development, QA routing
-- `agents.py`: Planner, Architect, Scaffold, Code, Integrator, QA, and legacy Developer prompts
-- `codex_runner.py`: Codex CLI subprocess wrapper and session parsing
-- `parallel_workflow.py`: contract, task assignment, workspace, and merge helpers
-- `local_dashboard_runner.py`: local non-Discord planning/contract/scaffold runner
-- `state_store.py`: persistent run state and event/transcript storage
-- `discord_ui.py`: approval buttons and revision modal
-- `discord_reporter.py`: Discord message helpers
-- `executable_qa.py`: generated app execution probes, screenshots, and runtime logs
-- `qa.py`: mechanical QA result composition, including the Python syntax adapter
-- `routing.py`: deterministic route selection for fast, balanced, parallel, and manual runs
-- `reference_packs.py`: copies curated reference packs into each run and loads
-  role-specific `pack/role` guidance for agent prompts
-- `reference_packs/karpathy/`: curated lightweight coding discipline for Code
-  Agents and the Integrator, based on andrej-karpathy-skills source material
-- `reference_packs/gstack/`: curated role guidance distilled from gstack source
-  skills without running the gstack installer or source scripts
-- `workspace_manager.py`: run folder and generated app folder helpers
-- `config.py`: environment variable configuration
-- `ux/`: React/Vite UI connected to the local API, with a Tauri desktop shell scaffold
+## 현재 검증 상태
 
-## Current Local App/API Snapshot
-
-Completed so far:
-
-- Added a UI-agnostic service layer in `app_services.py`:
-  - `RunService` for creating/listing runs and recording approve/cancel/change actions.
-  - `ArtifactService` for safe run artifact listing and file reads.
-  - `EventService` for converting `events.jsonl` into timeline DTOs.
-  - `ConfigService` for routing modes, defaults, provider display, Codex homes,
-    model, reasoning effort, and reference profiles.
-- Added `local_api.py` and `run_local_api.py` as the local-only FastAPI adapter.
-- Added React/Vite entry files and replaced the prototype UX mock wiring with
-  API calls for config, runs, events, artifacts, and approval actions.
-- Added a Tauri scaffold under `ux/src-tauri/` for the future desktop shell.
-- Hardened the Tauri shell into a usable local app wrapper:
-  - prefers the repo-local `.venv` Python for `run_local_api.py`,
-  - supports `ORCHESTRA_PYTHON` and `ORCHESTRA_REPO_ROOT` overrides,
-  - chooses a localhost API port and waits for `/health`,
-  - injects the API base URL into React,
-  - captures sidecar stdout/stderr under `tmp/tauri_sidecar/`,
-  - stops the sidecar on app close.
-- Added local provider/account display:
-  - `CODEX_HOME`
-  - `PLANNER_*_CODEX_HOME`
-  - `ARCHITECT_CODEX_HOME`
-  - `SCAFFOLD_CODEX_HOME`
-  - `CODE_AGENT_CODEX_HOMES`
-  - `QA_AGENT_CODEX_HOMES`
-- Added safe `.env` loading for non-secret local app defaults. Secret values
-  such as Discord tokens are not loaded by this service helper.
-- Created a local ignored `.env` on this machine that maps:
-  - `account_1` to `D:\codex_profiles\account_1`
-  - `account_2` to `D:\codex_profiles\account_2`
-- The local API currently reports both Codex accounts through `/config`.
-- The UI now shows the resolved Codex model and reasoning effort from env or
-  Codex config instead of a hardcoded default label.
-- The default prefilled request text was removed from the UI composer.
-- Manual mode now supports local UI add/toggle/delete for agents and passes
-  active Planner/Code/QA counts into `POST /runs`.
-- Fixed the app root height bug that caused a white gap when the viewport grew.
-- The React run monitor now defaults to a clean operator timeline that focuses
-  on agent outputs, approvals, user actions, and errors. Internal worker/system
-  events remain available through `System` and `All` filters.
-- Agent output events now preview the generated markdown artifact content
-  directly in the timeline.
-- The latest checked validation passed:
-  - `python -m py_compile app_services.py state_store.py tests\test_app_services.py`
-  - `python -m unittest discover -s tests`
-  - `npm run build` from `ux/`
-  - `cargo check` from `ux/src-tauri/`
-
-Still partial:
-
-- `POST /runs` now creates run state quickly and enqueues planning through the
-  FastAPI run worker. Plan approval now advances through the implementation and
-  QA workflow from the app.
-- Fast and balanced routes now run a single `CodeAgent(code_1)` against
-  `generated_app`; parallel and manual multi-code routes run contract,
-  scaffold, parallel Code Agents, integration, mechanical QA, optional LLM QA,
-  and the automatic fix loop.
-- QA approve is connected and moves `awaiting_qa_approval` to `completed`.
-  Operator-requested QA fixes after that checkpoint are still recorded but not
-  yet re-enqueued as a separate worker continuation.
-- Manual mode now supports per-agent Codex account/model/reasoning settings,
-  prompt snapshots, and constrained workflow graph editing. It is still not a
-  fully provider-agnostic arbitrary agent registry or arbitrary-DAG executor.
-- Tauri dev-mode app execution is verified, including sidecar startup. Windows
-  installer packaging is not yet smoke-tested.
-- The Python sidecar packaging strategy is still undecided for distributable
-  builds: source + existing Python/`.venv` for local development, or a bundled
-  sidecar executable for installer builds.
-
-FastAPI run worker migration status:
-
-- Added `run_worker.py` with an in-process `asyncio.Queue`, `RunJob`, active
-  job registry, per-run locks, and job dispatch for planning, plan approval,
-  plan revision, and cancellation.
-- Added `workflow_engine.py` as the non-Discord workflow stage owner for local
-  planning, route-aware implementation, QA, and automatic fix checkpoints.
-- Extended `state_store.py` with `active_step`, `control`, and `workflow`
-  helpers while keeping older run state readable.
-- Changed local API run creation so `POST /runs` creates run state quickly,
-  records routing/workflow/config, sets `planning_queued`, and enqueues
-  background planning instead of blocking on Codex planning.
-- Changed approve/request-changes/cancel service methods so they validate state,
-  persist approval/control events, and enqueue the next worker job when the
-  FastAPI worker is available.
-- Added an async full-workflow path for plan approval. Route behavior is now:
-  `fast` and `balanced` use a single Code Agent; `parallel` and manual routes
-  with more than one Code Agent use contract/scaffold/code/integration.
-- Shared local workflow helpers now pass stored Codex session ids into follow-up
-  calls and fall back to a fresh call if resume fails with a Codex execution
-  error.
-- Added Stage 3C observation APIs:
-  - `GET /runs/{run_id}/active-step`
-  - `GET /runs/{run_id}/logs`
-  - `GET /runs/{run_id}/logs/tail`
-  - enriched artifact metadata with type, stage, role, existence, size, and
-    updated time
-- The React run monitor now shows active step metadata and recent log tails from
-  the API instead of reading local files directly.
-- Added worker-focused tests using a fake workflow engine.
-- Verified on 2026-04-30 with Python compile checks, the unittest suite, and
-  the React/Vite production build.
-
-Stage 3 closeout:
-
-- Stage 3 is complete for the local API workflow and Discord adapter MVP.
-- Remaining Stage 3 hardening items should be carried as product backlog, not
-  blockers for starting Stage 4.
-- The project should now be used through the app on real development requests
-  to discover practical UX, QA, recovery, and packaging issues.
-
-## Known Limitations
-
-- The local API now creates run state quickly, enqueues planning, and continues
-  implementation/QA through the FastAPI run worker after plan approval.
-  `discord_bot.py` now uses the API adapter instead of directly running the
-  long workflow. The older `debate_engine.py` remains in the repository as a
-  legacy implementation/reference path.
-- Tauri scaffolding is present, but local packaging requires Rust/Cargo,
-  Node dependencies, and FastAPI dependencies to be installed on the machine.
-- The Discord approval path no longer always uses the full contract/scaffold/
-  parallel-code/integrator/QA-agent pipeline. Route selection is currently
-  explicit through configuration rather than a natural-language router.
-- `DeveloperAgent` is still kept for the original single-developer CLI path.
-  The newer routing design should reuse `CodeAgent(code_1)` for single-agent
-  implementation so single and parallel code paths share the same prompts and
-  manifest requirements.
-- `/dev --medium` or similar per-request model/reasoning selection is not implemented yet.
-- Global `CODEX_MODEL` and `CODEX_REASONING_EFFORT` defaults are supported, but Discord per-request model/reasoning selection is not implemented yet.
-- Discord messages show planning and QA output, but generated app execution commands are not yet summarized as clearly as they could be.
-- QA now has a first executable-probe slice for static HTML, Streamlit, CLI,
-  and opt-in Windows launcher checks. Broader GUI automation and app-specific
-  assertions are still limited.
-- Executable QA now prefers a generated `codex_app_manifest.json` that declares
-  safe setup, test, smoke, server, and browser checks in a language-neutral
-  schema. Framework detection remains as a fallback when the manifest is
-  missing.
-- Codex-backed QA Agent review is implemented after mechanical QA. It can use
-  the configured QA `CODEX_HOME`, model, reasoning effort, QA report, contract,
-  generated app listing, and attached screenshots.
-- Session resume is supported in the shared local workflow path, with fallback
-  to a fresh call on Codex execution failure. Deeper long-term memory compaction
-  is not implemented.
-- Discord approval controls are requester-only, not role/team-policy based.
-- `reference_packs/gstack_src/` and `reference_packs/karpathy_src/` are local
-  ignored vendor caches. The orchestrator only attaches curated committed
-  Markdown files to agent prompts; it does not run source scripts or installers.
-
-## Immediate Priorities
-
-### 0. Recommended Completion Sequence
-
-Complete the product in this order:
-
-1. Finish the desktop app surface and use it for real runs.
-   - Make the React/Tauri UI the primary control surface.
-   - Verify full run creation, plan approval, execution observation, QA review,
-     and completion from the app.
-   - Record dogfooding findings before doing broad cleanup.
-2. Package the local desktop app.
-   - Harden the Tauri sidecar lifecycle.
-   - Decide how the Python FastAPI sidecar is bundled.
-   - Build and smoke-test a Windows installer.
-3. Harden cancel, retry, and recovery based on real failures.
-   - Ensure cancelled runs are not overwritten by late worker exceptions.
-   - Add explicit retry entry points for failed or cancelled stages where
-     practical.
-   - Re-enqueue operator-requested QA fixes after `awaiting_qa_approval`.
-4. Strengthen generic executable QA where dogfooding shows gaps.
-   - Expand the initial manifest runner with richer schema coverage and
-     environment handling.
-   - Use framework adapters for Python, Node/Vite/React, static HTML, and CLI
-     projects when the manifest is missing.
-   - Add Playwright browser checks for web apps: page load, blank screen,
-     console errors, screenshot capture, and basic interaction probes.
-5. Clean up legacy paths after the packaged app proves the main workflow.
-   - Decide whether to remove or quarantine `debate_engine.py`.
-   - Keep `main.py` legacy CLI only if it remains useful for diagnostics.
-6. Polish app UX on top of the stable backend.
-   - Run graph and stage controls.
-   - Full artifact preview/editor.
-   - Per-agent account/model/reasoning selection.
-   - Real manual-mode agent registry.
-   - Better run history and status filtering.
-7. Implement Stage 6 prompt and skill configuration.
-   - Move hard-coded agent prompts into editable System Prompt templates.
-   - Keep Code Agents general by default and specialize through assignments or
-     optional skills.
-   - Add final prompt preview and prompt artifacts without cluttering the
-     default timeline.
-8. Move remaining provider setup and manual graph control into the desktop app.
-   - Codex/Claude install and login status.
-   - Model and reasoning dropdowns from provider catalogs.
-   - Usage limit display where available.
-   - Discord bot start/stop and diagnostics.
-   - Per-agent provider/account/model/reasoning configuration.
-   - Validated manual workflow graph execution.
-
-### 1. Routing Core Before More UI
-
-Implemented a first routing decision layer before development starts. The first
-version is deterministic and cheap rather than another Codex call.
-
-Target run modes:
-
-- `fast`: optional lightweight planning, `CodeAgent(code_1)` owns the whole
-  `generated_app`, then mechanical QA.
-- `balanced`: Planner A/B review, `CodeAgent(code_1)` owns implementation,
-  mechanical QA, and one QA Agent review.
-- `parallel`: current contract/scaffold/code-agent/integrator/QA workflow.
-- `manual`: user-provided planner/code/QA counts and model/reasoning settings.
-
-The selected route is recorded in `state.json` and a `route.json` artifact with
-the mode, pipeline stages, agent counts, and a short reason. Remaining work:
-expose route controls in Streamlit and Discord slash command options.
-
-### 2. Unify Single-Code and Parallel-Code Agents
-
-Keep `DeveloperAgent` only as a legacy compatibility path until it can be
-removed. Fast and balanced routes now use `CodeAgent(code_1)` directly, with an
-assignment that grants ownership of the whole generated app. Remaining work:
-move the original local CLI path to the same route-aware `CodeAgent` flow.
-
-### 3. Language-Neutral QA Manifest
-
-Require final app-producing agents to create `codex_app_manifest.json` in the
-app root:
-
-- Fast/balanced route: `CodeAgent(code_1)` creates the final manifest.
-- Parallel route: Scaffold may create a draft manifest, Code Agents may suggest
-  checks, and Integrator must finalize the manifest for `generated_app`.
-
-Mechanical QA should use this order:
-
-1. Read and validate `codex_app_manifest.json`.
-2. Execute safe manifest checks with `shell=False`, timeouts, captured logs, and
-   allowlisted commands.
-3. Fall back to README run-command parsing.
-4. Fall back to language/framework adapters such as Python, Node, Go, Rust, and
-   static web.
-5. Mark executable QA as `SKIP` with a clear reason if no safe target is found.
-
-QA Agent should review the manifest, mechanical QA report, screenshots, and
-contract. It should not be responsible for launching arbitrary commands.
-
-### 4. Repository Skills for Agent Quality
-
-Reference guidance is now role-specific with `pack/role` profiles. Defaults:
-
-- `planner_a`: none
-- `planner_b`: none
-- `code_agent`: `karpathy/code_agent`
-- `integrator`: `karpathy/integrator`
-- `qa_agent`: none
-
-gstack remains available as an opt-in profile source, for example
-`gstack/planner_a`, `gstack/planner_b`, or `gstack/qa_agent`. The orchestrator
-copies only the selected curated packs into `runs/<run_id>/reference_packs/` and
-records `reference_profiles.json`. Remaining work: expose profile selection in
-Discord and the dashboard, then promote stable files into repo-scoped skills
-under `.agents/skills` if the prompt-only pack proves useful.
-
-Candidate repo-scoped skills:
-
-- `planner-product`: small MVP planning, acceptance criteria, and route hints.
-- `task-splitter`: `task_manifest.json`, file ownership, dependency, and
-  integration-plan rules.
-- `app-manifest`: `codex_app_manifest.json` schema and safe command examples.
-- `qa-reviewer`: manifest/report/screenshot-based PASS/FAIL review format.
-- `frontend-visual-qa`: screenshot review rules for blank pages, layout
-  breakage, missing primary UI, and obvious interaction failures.
-
-Use skills to improve agent reasoning and output formats. Keep actual app
-execution, screenshots, command safety, logs, and timeouts in the Python QA
-harness.
-
-## Phase 2: Proposed Next Work
-
-### Per-request Model and Reasoning Options
-
-Add support for Discord command options such as:
+최근 확인:
 
 ```text
-/dev request:"Build a CSV preview app" reasoning:medium model:gpt-5.5
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+npm run build
 ```
 
-or a lightweight text convention:
+통과했습니다.
 
-```text
-/dev --medium Build a CSV preview app
-```
+## 제출 전 확인 항목
 
-Implementation notes:
+1. `balanced` 또는 `manual` 모드에서 실제 성공 run 확보
+2. LLM QA 산출물 확인
+   - `qa_workspace/evidence/verdict.json`
+   - `qa_workspace/evidence/qa_findings.md`
+   - `qa_workspace/evidence/command_log.jsonl`
+   - screenshots
+   - `qa_report.md`
+3. 앱 화면에서 타임라인과 우측 패널이 QA evidence를 제대로 보여주는지 시각 확인
+4. 과제 발표용 비교 시연 준비
+   - 단일 Codex 방식 결과물
+   - Orchestra 멀티 에이전트 방식 결과물
+   - QA guideline 변경에 따른 판단 차이
 
-- Implemented base support for `model` and `reasoning_effort` fields in `CodexResult`.
-- Implemented config defaults `CODEX_MODEL` and `CODEX_REASONING_EFFORT`.
-- Implemented explicit Codex CLI flags/config overrides in `codex_runner.py`.
-- Implemented recording selected model/reasoning in agent session state and Discord status output.
-- Remaining work: expose these as true per-request Discord slash command options.
+## 후순위
 
-### Better Discord Output
-
-- Post the exact generated app execution command after QA.
-- Upload or link `README.md` from `generated_app`.
-- Add a `/status run_id` command.
-- Add a `/runs` command for recent runs.
-- Add a `/cancel run_id` command for long-running tasks.
-
-### Stronger QA
-
-- Add generated app file presence checks.
-- Validate `codex_app_manifest.json` when present and surface schema errors in
-  the QA report.
-- Add a language-neutral manifest runner for safe local setup, test, CLI,
-  server, and browser checks.
-- Keep Python syntax checks as one adapter, not the whole QA model.
-- Add README run-command parsing as a fallback when the manifest is missing.
-- Expand app-specific browser assertions beyond the generic keyboard probe.
-- Add Tkinter/Pygame-safe smoke test strategy where practical.
-- Expand QA Agent prompts and routing for multiple specialized reviewers.
-
-### Code Review Agent
-
-- Reuse `CodeAgent(code_1)` for fast and balanced single-agent implementation.
-- Keep `DeveloperAgent` as a legacy path until the router can replace it.
-- Add Code Agent 2 or Reviewer Agent only when the selected route justifies it.
-- Reviewer checks whether generated code matches the approved plan.
-- Reviewer can request targeted Code Agent or Integrator revisions before QA.
-
-## Phase 3: Parallel Agent Workflow
-
-The original parallel-agent design has been folded into the implemented
-contract/scaffold/code/integrator workflow and the Stage 3/Stage 5C planning
-documents.
-
-### Contract-first Parallel Development
-
-- Implemented base Planner/Architect contract bundle before code starts:
-  - `requirements.md`
-  - `architecture.md`
-  - `api_contract.md` or `openapi.yaml`
-  - `data_model.md`
-  - `task_manifest.json`
-  - `file_ownership.md`
-  - `acceptance_tests.md`
-- Implemented human approval against the contract bundle.
-- Implemented Scaffold Agent for the shared project skeleton.
-- Implemented Code Agents for isolated task groups in parallel workspaces.
-- Implemented Integrator Agent that merges code-agent outputs into the final `generated_app`.
-- Implemented first mechanical QA split:
-  - Python syntax check
-  - executable probe for static HTML, Streamlit, CLI, and opt-in Windows launchers
-  - screenshots and runtime logs under `runs/<run_id>/qa/`
-  - Codex-backed QA Agent review after mechanical QA
-  - targeted fix routing to the owning Code Agent or Integrator
-  - Discord QA approval/fix request loop
-- Remaining work: add richer app-specific QA agents and stronger structured
-  plan-compliance scoring.
-
-### Dynamic Agent and Account Pool
-
-- Support Planner 2-3, Code 1-3, and QA 1-2 agents per run.
-- Add an agent registry with:
-  - `agent_id`
-  - role
-  - account assignment
-  - `CODEX_HOME`
-  - model
-  - reasoning effort
-  - system/developer prompt override
-- Allow two or more local Codex accounts by assigning different `CODEX_HOME`
-  directories per account.
-- Use account-level concurrency limits so agents can be distributed across
-  logged-in accounts.
-- Record account/model/reasoning/session details in `state.json`.
-
-### Team Collaboration
-
-- Role-based approval in Discord.
-- Multiple approvers.
-- Approval audit trail.
-- Git branch creation per run.
-- Optional automatic commit after approval.
-
-### Dashboard Direction
-
-- Discord becomes a message integration and mobile approval/feedback channel.
-- The React/Tauri desktop app becomes the primary control surface after the
-  core workflow is stable.
-- Dashboard controls should include agent counts, account pool, model selection,
-  reasoning effort, prompt overrides, task assignment, run graph, logs, and
-  artifact review.
-
-## Phase 4: Web Dashboard and Integrations
-
-### Web Dashboard
-
-- Build a local dashboard for creating and managing runs.
-- Show each stage of a run:
-  - planning
-  - contract approval
-  - scaffold
-  - parallel code batches
-  - integration
-  - QA
-  - completion
-- Provide forms for:
-  - agent count by role
-  - model/reasoning per agent
-  - account assignment
-  - prompt override editing
-  - contract review and approval
-  - task reassignment before code starts
-
-### Discord Adapter
-
-- Keep `/dev`, `/status`, `/runs`, and approval buttons as a remote control
-  layer.
-- Send dashboard links or local run paths in Discord status updates.
-- Do not make Discord the only place where detailed configuration is possible.
-
-### Framework Evaluation
-
-The current direct orchestrator fits the local Codex CLI constraint well.
-AutoGen, LangGraph, or Microsoft Agent Framework can be revisited if:
-
-- workflow state transitions become too complex,
-- visual traces are needed,
-- checkpointing and resumability exceed the simple `state.json` design,
-- or custom Codex CLI model clients become worth maintaining.
-
-LangGraph is the most likely candidate for future workflow orchestration, but
-Phase 1 intentionally avoids that dependency.
-
-## Git Sharing Notes
-
-Commit source and documentation files.
-
-Do not commit:
-
-- `runs/`
-- `__pycache__/`
-- `.pyc` files
-- local `.env` files
-- Discord bot tokens
-- Codex auth/cache directories
-
-Use `.gitignore` to keep generated run artifacts and local caches out of Git.
-
-## Stage 5B/5C/5G Status Update
-
-- Stage 5B is implemented as the current desktop settings slice. The roster can
-  select global Codex defaults, override account/model/reasoning per Codex
-  agent card, persist those choices through `local_app_settings.json`, and pass
-  exact `agent_configs` into run creation.
-- The workflow runner now prefers per-agent settings when launching Codex and
-  recording resumed sessions.
-- Remaining Stage 5 work is the larger product layer: richer manual graph
-  hardening, Discord bot supervisor controls, diagnostics/setup assistant, and
-  packaged-app follow-up.
-- Stage 5C planning is documented in `STAGE5C_MANUAL_AGENT_GRAPH_PLAN.md`.
-- Stage 5C-1 is implemented: manual mode now derives a workflow graph from the
-  enabled agent cards, previews it in the roster, sends it on run creation, and
-  the backend validates/stores it as `workflow.graph` plus
-  `workflow_graph.json`.
-- Stage 5C-2 is implemented as a constrained execution MVP: manual
-  `workflow.graph` now drives development route capabilities/counts, single-code
-  graphs use the single-code path, parallel-code graphs with integration use the
-  existing contract/scaffold/parallel/integration path, and graph boundary
-  events are emitted. This is still a supported-shape executor, not a general
-  arbitrary-DAG runtime.
-- Stage 5C-3 is implemented as a stage-card graph editor: manual stage cards
-  show assigned agents such as `Code Agent 1 + Code Agent 2`, mark parallel
-  stages explicitly, can be reordered by drag/drop or arrow controls,
-  integration can be toggled, reset restores the default order, and the edited
-  order is used for `workflow_graph`.
-- Stage 5G-1 is implemented: `local_prompt_overrides.json` stores local prompt
-  edits, `/prompts` endpoints expose QA presets and per-agent prompt text, the
-  roster opens a resizable Prompt Editor with Skill / Guideline, System Prompt,
-  and Effective Preview tabs, and run artifacts snapshot the exact prompt text
-  used for Planner/Code/Integrator/QA agents. QA Agent prompt overrides are
-  injected into the actual LLM QA review call.
+- OpenAI API key provider
+- Claude Code provider
+- 더 자유로운 DAG executor
+- QA 도구 확장
+- 강한 OS 격리 기반 QA sandbox
+- Windows installer packaging

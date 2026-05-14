@@ -72,6 +72,8 @@ export type UsageLimitInfo = {
 
 export type RuntimeUsageSnapshot = {
   provider: string;
+  account?: string | null;
+  codex_home?: string | null;
   source: string;
   ok: boolean;
   limits: UsageLimitInfo[];
@@ -111,6 +113,7 @@ export type AgentPromptConfig = {
   display_name: string;
   role: string;
   preset?: string | null;
+  skill_id?: string | null;
   default_skill_markdown: string;
   skill_markdown: string;
   default_system_prompt: string;
@@ -122,6 +125,7 @@ export type AgentPromptConfig = {
 export type AgentPromptSaveInput = {
   agent_id: string;
   preset?: string | null;
+  skill_id?: string | null;
   skill_markdown: string;
   system_prompt: string;
 };
@@ -134,8 +138,22 @@ export type PromptPresetInfo = {
   system_prompt: string;
 };
 
+export type SkillInfo = {
+  id: string;
+  label: string;
+  source: string;
+  description: string;
+  license: string;
+  relative_path: string;
+  size_chars: number;
+  recommended_for: string[];
+  variant: string;
+  markdown: string;
+};
+
 export type PromptCatalog = {
   presets: PromptPresetInfo[];
+  skills: SkillInfo[];
 };
 
 export type WorkflowStage = {
@@ -365,6 +383,10 @@ export function getRuntimeHealth(): Promise<RuntimeHealthSnapshot> {
 
 export function getRuntimeUsage(): Promise<RuntimeUsageSnapshot> {
   return apiFetch<RuntimeUsageSnapshot>("/runtime/usage");
+}
+
+export function getRuntimeUsages(): Promise<RuntimeUsageSnapshot[]> {
+  return apiFetch<RuntimeUsageSnapshot[]>("/runtime/usages");
 }
 
 export function loadSettings(): Promise<LocalAppSettings> {

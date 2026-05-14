@@ -28,9 +28,11 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
     tomllib = None  # type: ignore[assignment]
 
 from local_dashboard_runner import LocalRunConfig, REASONING_EFFORTS, RUN_MODES
+from prompt_templates import load_agent_system_prompt
 from reference_packs import DEFAULT_REFERENCE_PROFILES, normalize_reference_profile
 from run_worker import RunJob, RunWorker
 from routing import ROUTING_MODES, RoutingDecision, decide_route, normalize_routing_mode
+from skill_registry import DEFAULT_CODE_AGENT_SKILL_ID, SkillRegistry
 from state_store import StateStore
 from workflow_engine import workflow_from_route
 from workspace_manager import create_logs_dir, create_run_dir
@@ -206,6 +208,7 @@ class LocalAppSettings(BaseModel):
 class AgentPromptOverride(BaseModel):
     agent_id: str
     preset: str | None = None
+    skill_id: str | None = None
     skill_markdown: str = ""
     system_prompt: str = ""
 
@@ -223,6 +226,7 @@ class AgentPromptConfig(BaseModel):
     display_name: str
     role: str
     preset: str | None = None
+    skill_id: str | None = None
     default_skill_markdown: str = ""
     skill_markdown: str = ""
     default_system_prompt: str = ""
@@ -239,8 +243,22 @@ class PromptPresetInfo(BaseModel):
     system_prompt: str = ""
 
 
+class SkillInfo(BaseModel):
+    id: str
+    label: str
+    source: str
+    description: str = ""
+    license: str = ""
+    relative_path: str = ""
+    size_chars: int = 0
+    recommended_for: list[str] = Field(default_factory=list)
+    variant: str = ""
+    markdown: str = ""
+
+
 class PromptCatalog(BaseModel):
     presets: list[PromptPresetInfo]
+    skills: list[SkillInfo] = Field(default_factory=list)
 
 
 class OperatorActionRequest(BaseModel):
@@ -406,6 +424,8 @@ class UsageLimitInfo(BaseModel):
 
 class RuntimeUsageSnapshot(BaseModel):
     provider: str
+    account: str | None = None
+    codex_home: str | None = None
     source: str
     ok: bool
     limits: list[UsageLimitInfo] = Field(default_factory=list)
@@ -678,9 +698,27 @@ class PromptService:
     def __init__(self, project_root: Path) -> None:
         self.project_root = Path(project_root)
         self.prompts_path = self.project_root / "local_prompt_overrides.json"
+        self.skill_registry = SkillRegistry(self.project_root)
 
     def catalog(self) -> PromptCatalog:
-        return PromptCatalog(presets=list(PROMPT_PRESETS.values()))
+        return PromptCatalog(
+            presets=list(PROMPT_PRESETS.values()),
+            skills=[
+                SkillInfo(
+                    id=skill.id,
+                    label=skill.label,
+                    source=skill.source,
+                    description=skill.description,
+                    license=skill.license,
+                    relative_path=skill.relative_path,
+                    size_chars=skill.size_chars,
+                    recommended_for=list(skill.recommended_for),
+                    variant=skill.variant,
+                    markdown=self.skill_registry.load_skill_markdown(skill.id),
+                )
+                for skill in self.skill_registry.list_skills()
+            ],
+        )
 
     def get_prompt(self, agent_id: str) -> AgentPromptConfig:
         return self._prompt_config(agent_id)
@@ -706,6 +744,7 @@ class PromptService:
             if config.skill_markdown.strip() or config.system_prompt.strip():
                 result[agent_id] = {
                     "preset": config.preset or "",
+                    "skill_id": config.skill_id or "",
                     "skill_markdown": config.skill_markdown,
                     "system_prompt": config.system_prompt,
                 }
@@ -735,6 +774,7 @@ class PromptService:
             )
             snapshots[agent_id] = {
                 "preset": config.preset or "",
+                "skill_id": config.skill_id or "",
                 "skill": store.to_relative(skill_path),
                 "system": store.to_relative(system_path),
                 "effective_preview": store.to_relative(effective_path),
@@ -759,25 +799,40 @@ class PromptService:
         agent_id = agent_id.strip()
         role = _prompt_role(agent_id)
         preset_id = "default_qa" if role == "qa_agent" else None
-        default_skill = _default_skill_markdown(self.project_root, role)
-        default_system = _default_system_prompt(role)
+        default_skill_id = DEFAULT_CODE_AGENT_SKILL_ID if role == "code_agent" else None
+        default_skill = (
+            self.skill_registry.load_skill_markdown(default_skill_id)
+            if default_skill_id
+            else _default_skill_markdown(self.project_root, role)
+        )
+        default_system = _default_system_prompt(self.project_root, agent_id, role)
         if role == "qa_agent":
             preset = PROMPT_PRESETS[preset_id or "default_qa"]
             default_skill = preset.skill_markdown
-            default_system = preset.system_prompt
+            default_skill_id = None
         override = self._read_overrides().get(agent_id, {})
         if isinstance(override, dict):
             chosen_preset = str(override.get("preset") or preset_id or "")
+            chosen_skill_id = str(override.get("skill_id") or default_skill_id or "")
             if chosen_preset in PROMPT_PRESETS and not override.get("skill_markdown"):
                 default_skill = PROMPT_PRESETS[chosen_preset].skill_markdown
-                default_system = PROMPT_PRESETS[chosen_preset].system_prompt
+                chosen_skill_id = ""
+            if chosen_skill_id and not str(override.get("skill_markdown") or "").strip():
+                loaded_skill = self.skill_registry.load_skill_markdown(chosen_skill_id)
+                if loaded_skill:
+                    default_skill = loaded_skill
+            raw_system = override.get("system_prompt")
+            if role == "qa_agent" and _is_legacy_qa_preset_system_prompt(raw_system):
+                raw_system = None
             skill = str(override.get("skill_markdown") if override.get("skill_markdown") is not None else default_skill)
-            system = str(override.get("system_prompt") if override.get("system_prompt") is not None else default_system)
+            system = str(raw_system if raw_system is not None else default_system)
             preset_id = chosen_preset or preset_id
+            skill_id = chosen_skill_id or None
             saved = bool(override)
         else:
             skill = default_skill
             system = default_system
+            skill_id = default_skill_id
             saved = False
         preview = _effective_prompt_preview(system, skill)
         return AgentPromptConfig(
@@ -785,6 +840,7 @@ class PromptService:
             display_name=_actor_label(agent_id),
             role=role,
             preset=preset_id,
+            skill_id=skill_id,
             default_skill_markdown=default_skill,
             skill_markdown=skill,
             default_system_prompt=default_system,
@@ -889,12 +945,17 @@ class ProviderService:
             models=_parse_codex_models(payload),
         )
 
-    def get_runtime_usage(self) -> RuntimeUsageSnapshot:
+    def get_runtime_usage(self, *, codex_home: str | None = None, account: str | None = None) -> RuntimeUsageSnapshot:
         executable = _find_cli("codex")
+        source = "codex app-server account/rateLimits/read"
+        normalized_home = codex_home.strip() if codex_home else None
+        normalized_account = account or (_codex_account_label(normalized_home) if normalized_home else "default")
         if not executable:
             return RuntimeUsageSnapshot(
                 provider="codex",
-                source="codex app-server account/rateLimits/read",
+                account=normalized_account,
+                codex_home=normalized_home,
+                source=source,
                 ok=False,
                 limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
                 message="Codex CLI was not found on PATH.",
@@ -905,11 +966,14 @@ class ProviderService:
                 "account/rateLimits/read",
                 cwd=self.project_root,
                 timeout=25,
+                codex_home=normalized_home,
             )
         except RuntimeError as exc:
             return RuntimeUsageSnapshot(
                 provider="codex",
-                source="codex app-server account/rateLimits/read",
+                account=normalized_account,
+                codex_home=normalized_home,
+                source=source,
                 ok=False,
                 limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
                 message=str(exc),
@@ -918,14 +982,18 @@ class ProviderService:
         if not isinstance(rate_limits, dict):
             return RuntimeUsageSnapshot(
                 provider="codex",
-                source="codex app-server account/rateLimits/read",
+                account=normalized_account,
+                codex_home=normalized_home,
+                source=source,
                 ok=False,
                 limits=[UsageLimitInfo(name="5h limit"), UsageLimitInfo(name="weekly limit")],
                 message="Codex app-server returned no rateLimits payload.",
             )
         return RuntimeUsageSnapshot(
             provider="codex",
-            source="codex app-server account/rateLimits/read",
+            account=normalized_account,
+            codex_home=normalized_home,
+            source=source,
             ok=True,
             limits=[
                 _usage_limit_from_window("5h limit", rate_limits.get("primary")),
@@ -933,6 +1001,15 @@ class ProviderService:
             ],
             message=_codex_usage_message(rate_limits),
         )
+
+    def get_runtime_usages(self) -> list[RuntimeUsageSnapshot]:
+        targets = _codex_usage_targets(LocalRunConfig.from_env())
+        if not targets:
+            return [self.get_runtime_usage()]
+        return [
+            self.get_runtime_usage(account=account, codex_home=codex_home)
+            for account, codex_home in targets
+        ]
 
     def get_runtime_health(self) -> RuntimeHealthSnapshot:
         codex = self.get_codex_status()
@@ -1314,6 +1391,7 @@ class ArtifactService:
             run_dir / "planning",
             run_dir / "contract",
             run_dir / "qa",
+            run_dir / "prompts",
             run_dir / "logs",
             run_dir / "agent_outputs",
             run_dir / "generated_app",
@@ -1705,6 +1783,7 @@ def _run_cli_text(executable: str, args: list[str], *, timeout: int) -> subproce
         return subprocess.run(
             command,
             cwd=None,
+            env=_utf8_child_env(),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -1723,12 +1802,66 @@ def _cli_command(executable: str, args: list[str]) -> list[str]:
     return [executable, *args]
 
 
-def _codex_app_server_request(executable: str, method: str, *, cwd: Path, timeout: int) -> dict[str, Any]:
+def _utf8_child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("LANG", "C.UTF-8")
+    return env
+
+
+def _codex_usage_targets(defaults: LocalRunConfig) -> list[tuple[str, str | None]]:
+    raw_homes: list[str | None] = [os.environ.get("CODEX_HOME", "").strip() or None]
+    raw_homes.extend(
+        [
+            defaults.planner_a_codex_home,
+            defaults.planner_b_codex_home,
+            defaults.planner_c_codex_home,
+            defaults.architect_codex_home,
+            defaults.scaffold_codex_home,
+            defaults.integrator_codex_home,
+            *defaults.code_agent_codex_homes,
+            *defaults.qa_agent_codex_homes,
+        ]
+    )
+    explicit_homes = [home for home in raw_homes if isinstance(home, str) and home.strip()]
+    raw_homes = explicit_homes if explicit_homes else [None]
+
+    targets: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    for home in raw_homes:
+        normalized = home.strip() if isinstance(home, str) and home.strip() else None
+        key = normalized or "<default>"
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((_codex_account_label(normalized), normalized))
+    return targets
+
+
+def _codex_account_label(codex_home: str | None) -> str:
+    if not codex_home:
+        return "default"
+    return Path(codex_home).name or codex_home
+
+
+def _codex_app_server_request(
+    executable: str,
+    method: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    codex_home: str | None = None,
+) -> dict[str, Any]:
     command = _cli_command(executable, ["app-server", "--listen", "stdio://"])
+    env = _utf8_child_env()
+    if codex_home:
+        env["CODEX_HOME"] = codex_home
     try:
         process = subprocess.Popen(
             command,
             cwd=str(cwd),
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1951,16 +2084,9 @@ def _prompt_role(agent_id: str) -> str:
     return agent_id
 
 
-def _default_system_prompt(role: str) -> str:
-    if role == "planner_a":
-        return "You are a planning agent. Produce a concrete, small, testable implementation plan from the user request."
-    if role == "planner_b":
-        return "You are a planning reviewer. Find missing requirements, risks, and unclear acceptance criteria."
-    if role == "code_agent":
-        return "You are a code implementation agent. Modify only the assigned workspace and keep the app runnable."
-    if role == "integrator":
-        return "You are an integration agent. Merge completed work into a coherent generated app without unrelated changes."
-    return ""
+def _default_system_prompt(project_root: Path, agent_id: str, role: str) -> str:
+    del role
+    return load_agent_system_prompt(project_root, agent_id=agent_id)
 
 
 def _default_skill_markdown(project_root: Path, role: str) -> str:
@@ -2005,10 +2131,20 @@ def _default_skill_markdown(project_root: Path, role: str) -> str:
 def _effective_prompt_preview(system_prompt: str, skill_markdown: str) -> str:
     parts = []
     if system_prompt.strip():
-        parts.append(f"System prompt override:\n{system_prompt.strip()}")
+        parts.append(f"System Prompt:\n{system_prompt.strip()}")
     if skill_markdown.strip():
-        parts.append(f"Skill / guideline:\n{skill_markdown.strip()}")
+        parts.append(f"Skill / Guideline:\n{skill_markdown.strip()}")
     return "\n\n".join(parts)
+
+
+def _is_legacy_qa_preset_system_prompt(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.strip()
+    return any(
+        bool(preset.system_prompt.strip()) and normalized == preset.system_prompt.strip()
+        for preset in PROMPT_PRESETS.values()
+    )
 
 
 def _request_prompt_agent_ids(*, planner_count: int, code_agent_count: int, qa_agent_count: int) -> list[str]:
@@ -2079,7 +2215,7 @@ def _event_summary(event_type: str, data: dict[str, Any]) -> str:
     return ""
 
 
-def _event_artifact_preview(run_dir: Path, event_type: str, data: dict[str, Any], *, max_chars: int = 1200) -> str:
+def _event_artifact_preview(run_dir: Path, event_type: str, data: dict[str, Any], *, max_chars: int = 8000) -> str:
     if event_type != "agent_output":
         return ""
     path_value = data.get("path")
@@ -2107,10 +2243,35 @@ def _compact_text(text: str, *, max_chars: int) -> str:
 
 def _event_details(data: dict[str, Any]) -> list[str]:
     details: list[str] = []
-    for key in ["mode", "reason", "model", "reasoning_effort", "qa_status", "executable_status", "executable_app_type"]:
+    for key in [
+        "mode",
+        "reason",
+        "model",
+        "reasoning_effort",
+        "qa_status",
+        "scenario_status",
+        "executable_status",
+        "executable_app_type",
+        "path",
+        "scenario_path",
+        "error_path",
+        "workspace_path",
+        "verdict_path",
+        "findings_path",
+        "command_log_path",
+        "verdict_error",
+    ]:
         if key in data and data[key] not in {None, ""}:
             details.append(f"{key}: {data[key]}")
-    for key in ["files", "checked_files", "screenshots", "affected_paths", "suspected_owners"]:
+    for key in [
+        "files",
+        "checked_files",
+        "screenshots",
+        "artifact_paths",
+        "affected_paths",
+        "suspected_owners",
+        "hard_policy_errors",
+    ]:
         value = data.get(key)
         if isinstance(value, list):
             details.extend(f"{key}: {item}" for item in value[:12])
@@ -2119,16 +2280,23 @@ def _event_details(data: dict[str, Any]) -> list[str]:
 
 def _event_artifacts(data: dict[str, Any]) -> list[TimelineArtifact]:
     artifacts: list[TimelineArtifact] = []
-    if isinstance(data.get("path"), str):
-        path = str(data["path"])
+
+    def append_path(raw_path: object) -> None:
+        if not isinstance(raw_path, str) or not raw_path:
+            return
+        path = raw_path
+        if any(existing.path == path for existing in artifacts):
+            return
         artifacts.append(TimelineArtifact(name=Path(path).name or path, path=path, type=_artifact_kind(Path(path))))
-    for key in ["files", "screenshots"]:
+
+    for key in ["path", "scenario_path", "error_path", "report_path", "verdict_path", "findings_path", "command_log_path"]:
+        append_path(data.get(key))
+    for key in ["files", "screenshots", "artifact_paths"]:
         value = data.get(key)
         if not isinstance(value, list):
             continue
         for raw_path in value[:20]:
-            path = str(raw_path)
-            artifacts.append(TimelineArtifact(name=Path(path).name or path, path=path, type=_artifact_kind(Path(path))))
+            append_path(raw_path)
     return artifacts
 
 

@@ -113,9 +113,8 @@ def _fast_decision(requested_mode: str, *, reason: str) -> RoutingDecision:
 
 def _balanced_decision(requested_mode: str, *, qa_agent_count: int, reason: str) -> RoutingDecision:
     qa_count = max(0, qa_agent_count)
-    pipeline = ["planner_a", "planner_b", "planner_a_final", "code_1", "mechanical_qa"]
-    if qa_count:
-        pipeline.append("qa_agent")
+    pipeline = ["planner_a", "planner_b", "planner_a_final", "code_1"]
+    pipeline.append("qa_agent" if qa_count else "mechanical_qa")
     return RoutingDecision(
         requested_mode=requested_mode,
         mode="balanced",
@@ -147,10 +146,8 @@ def _parallel_decision(
         "scaffold",
         "code_agents",
         "integrator",
-        "mechanical_qa",
     ]
-    if qa_count:
-        pipeline.append("qa_agent")
+    pipeline.append("qa_agent" if qa_count else "mechanical_qa")
     return RoutingDecision(
         requested_mode=requested_mode,
         mode="parallel",

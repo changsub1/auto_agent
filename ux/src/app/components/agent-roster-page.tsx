@@ -24,6 +24,7 @@ import {
 import {
   AgentPromptConfig,
   PromptPresetInfo,
+  SkillInfo,
   AgentProviderConfig,
   AppConfig,
   LocalAppSettings,
@@ -35,7 +36,7 @@ import {
   WorkflowGraph,
   getCodexModels,
   getRuntimeHealth,
-  getRuntimeUsage,
+  getRuntimeUsages,
   listProviders,
   loadAgentPrompt,
   loadPromptCatalog,
@@ -598,7 +599,7 @@ function ResourcePanel({
   providers,
   models,
   health,
-  usage,
+  usages,
   loading,
   error,
   onRefresh,
@@ -607,7 +608,7 @@ function ResourcePanel({
   providers: ProviderCliStatus[];
   models: ProviderModelCatalog | null;
   health: RuntimeHealthSnapshot | null;
-  usage: RuntimeUsageSnapshot | null;
+  usages: RuntimeUsageSnapshot[];
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -615,6 +616,7 @@ function ResourcePanel({
 }) {
   const codexModels = models?.models || [];
   const selectedModel = codexModels[0];
+  const usageItems = usages || [];
   return (
     <div className="absolute inset-0 z-20 bg-slate-950/20 backdrop-blur-[1px] flex justify-end">
       <section className="w-[440px] h-full border-l border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-[-12px_0_32px_rgba(15,23,42,0.12)] flex flex-col">
@@ -680,30 +682,48 @@ function ResourcePanel({
           </ResourceSection>
           <ResourceSection title="Usage">
             <div className="flex items-center justify-between">
-              <span className="text-slate-600 dark:text-slate-400" style={{ fontSize: 12 }}>{usage?.source || "not loaded"}</span>
-              <StatusToken status={usage?.ok ? "ready" : "unavailable"} />
+              <span className="text-slate-600 dark:text-slate-400" style={{ fontSize: 12 }}>
+                {usageItems.length > 0 ? `${usageItems.length} Codex account${usageItems.length === 1 ? "" : "s"}` : "not loaded"}
+              </span>
+              <StatusToken status={usageItems.some((usage) => usage.ok) ? "ready" : "unavailable"} />
             </div>
-            {(usage?.limits || []).map((limit) => (
-              <div key={limit.name} className="rounded border border-slate-200 dark:border-slate-700 px-2 py-1.5 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span style={{ fontSize: 12 }}>{limit.name}</span>
-                  <span className="font-mono text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>
-                    {limit.available ? `${limit.remaining_percent ?? "--"}% left` : "unavailable"}
-                  </span>
+            {usageItems.map((usage, index) => (
+              <div key={`${usage.account || "default"}-${usage.codex_home || index}`} className="rounded border border-slate-200 dark:border-slate-700 px-2 py-1.5 space-y-1.5 bg-white dark:bg-slate-900">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-mono text-slate-800 dark:text-slate-200 truncate" style={{ fontSize: 12 }}>
+                      {usage.account || "default"}
+                    </div>
+                    <div className="font-mono text-slate-500 dark:text-slate-500 truncate" style={{ fontSize: 10 }}>
+                      {usage.codex_home || "default CODEX_HOME"}
+                    </div>
+                  </div>
+                  <StatusToken status={usage.ok ? "ready" : "unavailable"} />
                 </div>
-                <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-indigo-500"
-                    style={{ width: `${limit.available ? Math.max(0, Math.min(100, limit.remaining_percent ?? 0)) : 0}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-slate-500 dark:text-slate-500" style={{ fontSize: 10 }}>
-                  <span>{limit.used_percent == null ? "-- used" : `${limit.used_percent}% used`}</span>
-                  <span>{formatResetAt(limit.reset_at)}</span>
-                </div>
+                {usage.limits.map((limit) => (
+                  <div key={limit.name} className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span style={{ fontSize: 12 }}>{limit.name}</span>
+                      <span className="font-mono text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>
+                        {limit.available ? `${limit.remaining_percent ?? "--"}% left` : "unavailable"}
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-indigo-500"
+                        style={{ width: `${limit.available ? Math.max(0, Math.min(100, limit.remaining_percent ?? 0)) : 0}%` }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between text-slate-500 dark:text-slate-500" style={{ fontSize: 10 }}>
+                      <span>{limit.used_percent == null ? "-- used" : `${limit.used_percent}% used`}</span>
+                      <span>{formatResetAt(limit.reset_at)}</span>
+                    </div>
+                  </div>
+                ))}
+                {usage.message && <div className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>{usage.message}</div>}
               </div>
             ))}
-            {usage?.message && <div className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>{usage.message}</div>}
+            {usageItems.length === 0 && <div className="text-slate-500 dark:text-slate-500" style={{ fontSize: 12 }}>Usage has not been loaded.</div>}
           </ResourceSection>
           <ResourceSection title="Runtime">
             <MiniField label="overall" value={health?.status || "--"} />
@@ -721,6 +741,7 @@ function PromptEditorPanel({
   agent,
   promptConfig,
   presets,
+  skills,
   loading,
   saving,
   error,
@@ -730,6 +751,7 @@ function PromptEditorPanel({
   onWidthChange,
   onChange,
   onApplyPreset,
+  onApplySkill,
   onSave,
   onReset,
   onClose,
@@ -737,6 +759,7 @@ function PromptEditorPanel({
   agent: Agent;
   promptConfig: AgentPromptConfig | null;
   presets: PromptPresetInfo[];
+  skills: SkillInfo[];
   loading: boolean;
   saving: boolean;
   error: string | null;
@@ -746,11 +769,15 @@ function PromptEditorPanel({
   onWidthChange: (value: number) => void;
   onChange: (patch: Partial<AgentPromptConfig>) => void;
   onApplyPreset: (preset: PromptPresetInfo) => void;
+  onApplySkill: (skill: SkillInfo) => void;
   onSave: () => void;
   onReset: () => void;
   onClose: () => void;
 }) {
-  const qaPresets = presets.filter((preset) => preset.id.includes("qa"));
+  const qaPresets = promptConfig?.role === "qa_agent" ? presets.filter((preset) => preset.id.includes("qa")) : [];
+  const availableSkills = skills;
+  const showGuidelinePresets = activeTab === "skill" && qaPresets.length > 0;
+  const showSkillSelector = activeTab === "skill" && availableSkills.length > 0;
   const textValue =
     activeTab === "system"
       ? promptConfig?.system_prompt || ""
@@ -796,25 +823,57 @@ function PromptEditorPanel({
             <input type="range" min={42} max={68} value={width} onChange={(event) => onWidthChange(Number(event.target.value))} />
           </label>
         </div>
-        <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
-          <span className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>Preset</span>
-          <select
-            value={promptConfig?.preset || ""}
-            onChange={(event) => {
-              const preset = qaPresets.find((item) => item.id === event.target.value);
-              if (preset) onApplyPreset(preset);
-            }}
-            className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-slate-700 dark:text-slate-300"
-            style={{ fontSize: 12 }}
-          >
-            {qaPresets.map((preset) => (
-              <option key={preset.id} value={preset.id}>{preset.label}</option>
-            ))}
-          </select>
-          <span className="text-slate-400 dark:text-slate-500 truncate" style={{ fontSize: 11 }}>
-            {qaPresets.find((preset) => preset.id === promptConfig?.preset)?.description || "Custom prompt"}
-          </span>
-        </div>
+        {(showGuidelinePresets || showSkillSelector) && (
+          <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-2">
+            {showSkillSelector && (
+              <>
+                <span className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>Skill Source</span>
+                <select
+                  value={promptConfig?.skill_id || ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (!value) {
+                      onChange({ skill_id: null });
+                      return;
+                    }
+                    const skill = availableSkills.find((item) => item.id === value);
+                    if (skill) onApplySkill(skill);
+                  }}
+                  className="max-w-64 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-slate-700 dark:text-slate-300"
+                  style={{ fontSize: 12 }}
+                >
+                  <option value="">Custom / manual</option>
+                  {availableSkills.map((skill) => (
+                    <option key={skill.id} value={skill.id}>{skill.label}</option>
+                  ))}
+                </select>
+              </>
+            )}
+            {showGuidelinePresets && (
+              <>
+                <span className="text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>QA Preset</span>
+                <select
+                  value={promptConfig?.preset || ""}
+                  onChange={(event) => {
+                    const preset = qaPresets.find((item) => item.id === event.target.value);
+                    if (preset) onApplyPreset(preset);
+                  }}
+                  className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-slate-700 dark:text-slate-300"
+                  style={{ fontSize: 12 }}
+                >
+                  {qaPresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                  ))}
+                </select>
+              </>
+            )}
+            <span className="text-slate-400 dark:text-slate-500 truncate" style={{ fontSize: 11 }}>
+              {availableSkills.find((skill) => skill.id === promptConfig?.skill_id)?.description
+                || qaPresets.find((preset) => preset.id === promptConfig?.preset)?.description
+                || "Custom guideline"}
+            </span>
+          </div>
+        )}
         <div className="flex-1 min-h-0 p-4">
           {error && <div className="mb-2 rounded border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2" style={{ fontSize: 12 }}>{error}</div>}
           {loading ? (
@@ -1155,7 +1214,7 @@ export function AgentRosterPage({
   const [providerStatuses, setProviderStatuses] = useState<ProviderCliStatus[]>([]);
   const [codexModels, setCodexModels] = useState<ProviderModelCatalog | null>(null);
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthSnapshot | null>(null);
-  const [runtimeUsage, setRuntimeUsage] = useState<RuntimeUsageSnapshot | null>(null);
+  const [runtimeUsages, setRuntimeUsages] = useState<RuntimeUsageSnapshot[]>([]);
   const [selectedAccountHome, setSelectedAccountHome] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedReasoning, setSelectedReasoning] = useState("");
@@ -1167,6 +1226,7 @@ export function AgentRosterPage({
   const [promptPanelAgentId, setPromptPanelAgentId] = useState<string | null>(null);
   const [promptConfig, setPromptConfig] = useState<AgentPromptConfig | null>(null);
   const [promptPresets, setPromptPresets] = useState<PromptPresetInfo[]>([]);
+  const [promptSkills, setPromptSkills] = useState<SkillInfo[]>([]);
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
@@ -1331,12 +1391,12 @@ export function AgentRosterPage({
         listProviders(),
         getCodexModels(),
         getRuntimeHealth(),
-        getRuntimeUsage(),
+        getRuntimeUsages(),
       ]);
       setProviderStatuses(nextProviders);
       setCodexModels(nextModels);
       setRuntimeHealth(nextHealth);
-      setRuntimeUsage(nextUsage);
+      setRuntimeUsages(nextUsage);
     } catch (err) {
       setResourceError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1362,6 +1422,7 @@ export function AgentRosterPage({
         if (cancelled) return;
         setPromptConfig(agentPrompt);
         setPromptPresets(catalog.presets);
+        setPromptSkills(catalog.skills || []);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -1422,8 +1483,8 @@ export function AgentRosterPage({
       if (!current) return current;
       const next = { ...current, ...patch };
       next.effective_prompt_preview = [
-        next.system_prompt?.trim() ? `System prompt override:\n${next.system_prompt.trim()}` : "",
-        next.skill_markdown?.trim() ? `Skill / guideline:\n${next.skill_markdown.trim()}` : "",
+        next.system_prompt?.trim() ? `System Prompt:\n${next.system_prompt.trim()}` : "",
+        next.skill_markdown?.trim() ? `Skill / Guideline:\n${next.skill_markdown.trim()}` : "",
       ].filter(Boolean).join("\n\n");
       return next;
     });
@@ -1432,8 +1493,16 @@ export function AgentRosterPage({
   function applyPromptPreset(preset: PromptPresetInfo) {
     updatePromptConfig({
       preset: preset.id,
+      skill_id: null,
       skill_markdown: preset.skill_markdown,
-      system_prompt: preset.system_prompt,
+    });
+  }
+
+  function applySkillSource(skill: SkillInfo) {
+    updatePromptConfig({
+      skill_id: skill.id,
+      preset: null,
+      skill_markdown: skill.markdown,
     });
   }
 
@@ -1445,6 +1514,7 @@ export function AgentRosterPage({
       const saved = await saveAgentPrompt(promptConfig.agent_id, {
         agent_id: promptConfig.agent_id,
         preset: promptConfig.preset || null,
+        skill_id: promptConfig.skill_id || null,
         skill_markdown: promptConfig.skill_markdown,
         system_prompt: promptConfig.system_prompt,
       });
@@ -1905,7 +1975,7 @@ export function AgentRosterPage({
           providers={providerStatuses}
           models={codexModels}
           health={runtimeHealth}
-          usage={runtimeUsage}
+          usages={runtimeUsages}
           loading={resourceLoading}
           error={resourceError}
           onRefresh={loadResources}
@@ -1917,6 +1987,7 @@ export function AgentRosterPage({
           agent={selectedPromptAgent}
           promptConfig={promptConfig}
           presets={promptPresets}
+          skills={promptSkills}
           loading={promptLoading}
           saving={promptSaving}
           error={promptError}
@@ -1926,6 +1997,7 @@ export function AgentRosterPage({
           onWidthChange={setPromptPanelWidth}
           onChange={updatePromptConfig}
           onApplyPreset={applyPromptPreset}
+          onApplySkill={applySkillSource}
           onSave={handleSaveAgentPrompt}
           onReset={handleResetAgentPrompt}
           onClose={() => {

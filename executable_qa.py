@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -185,6 +186,26 @@ def _run_manifest_probe(
             executed_steps += 1
             if run_result.status == "FAIL":
                 errors.append(run_result.error_log or "Manifest run command failed.")
+        elif _manifest_expects_browser_probe(app_type, manifest):
+            html_path = _manifest_static_html_path(workdir, manifest)
+            if html_path is None:
+                errors.append(
+                    "Manifest describes a browser/static app, but no run.ready_url or local HTML entrypoint was found."
+                )
+            else:
+                browser_result = _run_static_html_probe(
+                    workdir,
+                    qa_dir,
+                    {"kind": "static_html", "path": html_path, "app_type": app_type},
+                    attempt_name=f"{attempt_name} manifest static browser probe",
+                    timeout=timeout,
+                )
+                artifact_paths.extend(browser_result.artifact_paths)
+                screenshots.extend(browser_result.screenshots)
+                details.append(browser_result.report_markdown)
+                executed_steps += 1
+                if browser_result.status == "FAIL":
+                    errors.append(browser_result.error_log or "Manifest static browser probe failed.")
 
     if executed_steps == 0 and not errors:
         return _skipped_result(
@@ -220,6 +241,39 @@ def _run_manifest_probe(
     )
 
 
+def _manifest_expects_browser_probe(app_type: str, manifest: dict[str, Any]) -> bool:
+    values = " ".join(
+        str(value).lower()
+        for value in [
+            app_type,
+            manifest.get("runtime"),
+            manifest.get("framework"),
+            manifest.get("kind"),
+        ]
+        if value is not None
+    )
+    return any(token in values for token in ["web", "browser", "html", "static", "frontend", "game"])
+
+
+def _manifest_static_html_path(workdir: Path, manifest: dict[str, Any]) -> Path | None:
+    for key in ("entrypoint", "main", "path", "html"):
+        value = manifest.get(key)
+        if not isinstance(value, str) or not value.lower().endswith((".html", ".htm")):
+            continue
+        candidate = (workdir / value).resolve()
+        try:
+            candidate.relative_to(workdir.resolve())
+        except ValueError:
+            continue
+        if candidate.exists():
+            return candidate
+
+    for candidate in [workdir / "index.html", workdir / "public" / "index.html", workdir / "dist" / "index.html"]:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
 def _run_manifest_run_command(
     workdir: Path,
     qa_dir: Path,
@@ -248,6 +302,7 @@ def _run_manifest_run_command(
         process = subprocess.Popen(
             command,
             cwd=str(workdir),
+            env=_utf8_child_env(),
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
@@ -312,6 +367,9 @@ def _run_manifest_command(
             cwd=str(workdir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_utf8_child_env(),
             timeout=timeout,
             shell=False,
         )
@@ -587,6 +645,7 @@ def _run_streamlit_probe(
         process = subprocess.Popen(
             command,
             cwd=str(app_dir),
+            env=_utf8_child_env(),
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
@@ -669,8 +728,9 @@ def _run_browser_probe(
     browser_log_path = qa_dir / "browser_console.json"
     errors: list[str] = []
     visual_probe: dict[str, Any] = {}
-    scroll_before: int | float | None = None
-    scroll_after: int | float | None = None
+    scenario_path = qa_dir / "qa_scenarios.json"
+    scenario_result_path = qa_dir / "scenario_results.json"
+    scenario_details: list[str] = []
 
     try:
         with sync_playwright() as playwright:
@@ -685,24 +745,26 @@ def _run_browser_probe(
             page.screenshot(path=str(initial_path), full_page=True)
             screenshots.append(initial_path)
 
-            scroll_before = page.evaluate("() => window.scrollY")
-            page.keyboard.press("ArrowLeft")
-            page.wait_for_timeout(100)
-            page.keyboard.press("ArrowRight")
-            page.wait_for_timeout(100)
-            page.keyboard.press("ArrowUp")
-            page.wait_for_timeout(100)
-            page.keyboard.press("ArrowDown")
-            page.wait_for_timeout(100)
-            page.keyboard.press("Space")
-            page.wait_for_timeout(100)
-            page.keyboard.press("KeyR")
-            page.wait_for_timeout(300)
-            scroll_after = page.evaluate("() => window.scrollY")
-
-            after_keys_path = qa_dir / "screenshot_after_keys.png"
-            page.screenshot(path=str(after_keys_path), full_page=True)
-            screenshots.append(after_keys_path)
+            if scenario_path.exists():
+                scenario_result = _run_browser_scenarios(
+                    page,
+                    scenario_path=scenario_path,
+                    qa_dir=qa_dir,
+                    base_url=url,
+                )
+                screenshots.extend(scenario_result["screenshots"])
+                errors.extend(scenario_result["errors"])
+                scenario_details.extend(scenario_result["details"])
+                scenario_result_path.write_text(
+                    json.dumps(scenario_result["results"], ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                artifact_paths.extend([scenario_path, scenario_result_path])
+            else:
+                scenario_details.append(
+                    "No qa_scenarios.json was provided. Browser QA used only load, "
+                    "console/page-error capture, initial screenshot, and visual content probe."
+                )
 
             visual_probe = page.evaluate(_VISUAL_PROBE_JS)
             browser.close()
@@ -717,8 +779,6 @@ def _run_browser_probe(
         errors.extend(f"Page error: {error}" for error in page_errors)
     if console_errors:
         errors.extend(f"Console error: {msg.get('text', '')}" for msg in console_errors)
-    if scroll_before is not None and scroll_after not in (None, scroll_before):
-        errors.append(f"Keyboard input changed window.scrollY from {scroll_before} to {scroll_after}.")
     if visual_probe and not _visual_probe_has_content(visual_probe):
         errors.append(f"Visual probe suggests the page is blank: {json.dumps(visual_probe, ensure_ascii=False)}")
 
@@ -729,8 +789,8 @@ def _run_browser_probe(
         page_errors=page_errors,
         console_messages=console_messages,
         visual_probe=visual_probe,
-        scroll_before=scroll_before,
-        scroll_after=scroll_after,
+        scenario_path=scenario_path if scenario_path.exists() else None,
+        scenario_details=scenario_details,
     )
     report = _build_report(
         attempt_name=attempt_name,
@@ -755,6 +815,224 @@ def _run_browser_probe(
         error_log="\n".join(errors),
         command=command,
     )
+
+
+def _run_browser_scenarios(
+    page: Any,
+    *,
+    scenario_path: Path,
+    qa_dir: Path,
+    base_url: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(scenario_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {
+            "errors": [f"qa_scenarios.json is invalid JSON: {exc}"],
+            "screenshots": [],
+            "details": ["qa_scenarios.json could not be parsed."],
+            "results": {"status": "FAIL", "error": str(exc), "scenarios": []},
+        }
+
+    scenarios = payload.get("scenarios") if isinstance(payload, dict) else None
+    if not isinstance(scenarios, list) or not scenarios:
+        return {
+            "errors": ["qa_scenarios.json must contain a non-empty scenarios array."],
+            "screenshots": [],
+            "details": ["qa_scenarios.json did not declare any executable scenarios."],
+            "results": {"status": "FAIL", "scenarios": []},
+        }
+
+    all_errors: list[str] = []
+    screenshots: list[Path] = []
+    details: list[str] = []
+    result_scenarios: list[dict[str, Any]] = []
+
+    for scenario_index, scenario in enumerate(scenarios, start=1):
+        if not isinstance(scenario, dict):
+            error = f"scenario[{scenario_index}] must be an object."
+            all_errors.append(error)
+            result_scenarios.append({"index": scenario_index, "status": "FAIL", "errors": [error], "steps": []})
+            continue
+
+        name = str(scenario.get("name") or f"scenario_{scenario_index}")
+        steps = scenario.get("steps")
+        scenario_errors: list[str] = []
+        step_results: list[dict[str, Any]] = []
+        if not isinstance(steps, list) or not steps:
+            scenario_errors.append(f"{name}: steps must be a non-empty array.")
+        else:
+            for step_index, step in enumerate(steps, start=1):
+                step_result = _run_browser_scenario_step(
+                    page,
+                    qa_dir=qa_dir,
+                    base_url=base_url,
+                    scenario_name=name,
+                    scenario_index=scenario_index,
+                    step_index=step_index,
+                    step=step,
+                )
+                step_results.append(step_result)
+                screenshots.extend(step_result.get("screenshot_paths", []))
+                if step_result.get("status") == "FAIL":
+                    scenario_errors.append(str(step_result.get("error") or "unknown step failure"))
+                    if bool(scenario.get("stop_on_failure", True)):
+                        break
+
+        status = "FAIL" if scenario_errors else "PASS"
+        if scenario_errors:
+            all_errors.extend(scenario_errors)
+        details.append(f"- {name}: {status}")
+        serializable_steps = []
+        for step_result in step_results:
+            serializable_step = dict(step_result)
+            serializable_step.pop("screenshot_paths", None)
+            serializable_steps.append(serializable_step)
+        result_scenarios.append(
+            {
+                "index": scenario_index,
+                "name": name,
+                "status": status,
+                "errors": scenario_errors,
+                "steps": serializable_steps,
+            }
+        )
+
+    return {
+        "errors": all_errors,
+        "screenshots": screenshots,
+        "details": ["Scenario results:", *details],
+        "results": {
+            "status": "FAIL" if all_errors else "PASS",
+            "scenarios": result_scenarios,
+        },
+    }
+
+
+def _run_browser_scenario_step(
+    page: Any,
+    *,
+    qa_dir: Path,
+    base_url: str,
+    scenario_name: str,
+    scenario_index: int,
+    step_index: int,
+    step: Any,
+) -> dict[str, Any]:
+    if not isinstance(step, dict):
+        return {"step": step_index, "status": "FAIL", "error": f"{scenario_name} step[{step_index}] must be an object."}
+
+    action = str(step.get("action") or "").strip().lower()
+    label = f"{scenario_name} step[{step_index}] {action or '(missing action)'}"
+    screenshots: list[Path] = []
+
+    try:
+        if action == "goto":
+            target_url = _resolve_scenario_url(base_url, str(step.get("url") or ""))
+            page.goto(target_url, wait_until="load", timeout=_step_timeout_ms(step))
+            page.wait_for_timeout(300)
+        elif action == "click":
+            _locator(page, step).click(timeout=_step_timeout_ms(step))
+        elif action == "press":
+            key = str(step.get("key") or "")
+            if not key:
+                raise ValueError("press.key is required")
+            selector = str(step.get("selector") or "").strip()
+            if selector:
+                _locator(page, step).press(key, timeout=_step_timeout_ms(step))
+            else:
+                page.keyboard.press(key)
+        elif action == "type":
+            text = str(step.get("text") or "")
+            selector = str(step.get("selector") or "").strip()
+            if not selector:
+                raise ValueError("type.selector is required")
+            _locator(page, step).fill(text, timeout=_step_timeout_ms(step))
+        elif action == "drag":
+            locator = _locator(page, step)
+            box = locator.bounding_box(timeout=_step_timeout_ms(step))
+            if not box:
+                raise ValueError("drag target has no bounding box")
+            dx = float(step.get("dx") or 0)
+            dy = float(step.get("dy") or 0)
+            start_x = box["x"] + box["width"] / 2
+            start_y = box["y"] + box["height"] / 2
+            page.mouse.move(start_x, start_y)
+            page.mouse.down()
+            page.mouse.move(start_x + dx, start_y + dy, steps=8)
+            page.mouse.up()
+        elif action == "expect_text":
+            text = str(step.get("text") or "")
+            if not text:
+                raise ValueError("expect_text.text is required")
+            body_text = page.locator("body").inner_text(timeout=_step_timeout_ms(step))
+            if text not in body_text:
+                raise AssertionError(f"expected text not found: {text}")
+        elif action == "expect_visible":
+            _locator(page, step).wait_for(state="visible", timeout=_step_timeout_ms(step))
+        elif action == "expect_count":
+            selector = str(step.get("selector") or "").strip()
+            expected = int(step.get("count"))
+            actual = page.locator(selector).count()
+            if actual != expected:
+                raise AssertionError(f"expected {expected} matches for {selector}, got {actual}")
+        elif action == "wait":
+            page.wait_for_timeout(_wait_ms(step))
+        elif action == "screenshot":
+            name = _safe_label(str(step.get("name") or f"scenario_{scenario_index}_step_{step_index}"))
+            screenshot_path = qa_dir / f"screenshot_{name}.png"
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            screenshots.append(screenshot_path)
+        else:
+            raise ValueError(f"unsupported action: {action or '(missing)'}")
+    except Exception as exc:  # noqa: BLE001 - scenario failures are QA evidence.
+        return {
+            "step": step_index,
+            "action": action,
+            "status": "FAIL",
+            "error": f"{label} failed: {type(exc).__name__}: {exc}",
+            "screenshots": [str(path) for path in screenshots],
+            "screenshot_paths": screenshots,
+        }
+
+    return {
+        "step": step_index,
+        "action": action,
+        "status": "PASS",
+        "screenshots": [str(path) for path in screenshots],
+        "screenshot_paths": screenshots,
+    }
+
+
+def _locator(page: Any, step: dict[str, Any]) -> Any:
+    selector = str(step.get("selector") or "").strip()
+    if not selector:
+        raise ValueError(f"{step.get('action', 'action')}.selector is required")
+    return page.locator(selector).first
+
+
+def _resolve_scenario_url(base_url: str, value: str) -> str:
+    value = value.strip()
+    if not value:
+        return base_url
+    if value.startswith(("http://127.0.0.1:", "http://localhost:", "file://")):
+        return value
+    if value.startswith("/"):
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, value, "", "", ""))
+        if parsed.scheme == "file":
+            base_dir = Path(urllib.request.url2pathname(parsed.path)).parent
+            return (base_dir / value.lstrip("/")).resolve().as_uri()
+    return urllib.parse.urljoin(base_url, value)
+
+
+def _step_timeout_ms(step: dict[str, Any]) -> int:
+    return _int_value(step.get("timeout_ms") or step.get("timeout_seconds"), 5) * (1 if step.get("timeout_ms") else 1000)
+
+
+def _wait_ms(step: dict[str, Any]) -> int:
+    return max(0, min(_int_value(step.get("ms") or step.get("timeout_ms"), 500), 30000))
 
 
 def _run_cli_probe(
@@ -813,6 +1091,9 @@ def _run_process_probe(
             cwd=str(app_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_utf8_child_env(),
             timeout=timeout,
             shell=False,
         )
@@ -933,17 +1214,16 @@ def _browser_details(
     page_errors: list[str],
     console_messages: list[dict[str, str]],
     visual_probe: dict[str, Any],
-    scroll_before: int | float | None,
-    scroll_after: int | float | None,
+    scenario_path: Path | None,
+    scenario_details: list[str],
 ) -> str:
     return "\n".join(
         [
             f"- URL: `{url}`",
             f"- Page errors: {len(page_errors)}",
             f"- Console messages: {len(console_messages)}",
-            f"- Keyboard probe: ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Space, R",
-            f"- Scroll before keys: {scroll_before}",
-            f"- Scroll after keys: {scroll_after}",
+            f"- Scenario file: `{scenario_path}`" if scenario_path else "- Scenario file: None",
+            *(scenario_details or ["No scenario details."]),
             f"- Visual probe: `{json.dumps(visual_probe, ensure_ascii=False)}`",
             "",
             "Errors:",
@@ -1002,6 +1282,14 @@ def _safe_process_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _utf8_child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("LANG", "C.UTF-8")
+    return env
 
 
 _VISUAL_PROBE_JS = """

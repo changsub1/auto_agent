@@ -143,6 +143,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def runtime_usage() -> RuntimeUsageSnapshot:
         return provider_service.get_runtime_usage()
 
+    @app.get("/runtime/usages", response_model=list[RuntimeUsageSnapshot])
+    def runtime_usages() -> list[RuntimeUsageSnapshot]:
+        return provider_service.get_runtime_usages()
+
     @app.get("/runs", response_model=list[RunSummary])
     def list_runs(limit: Annotated[int, Query(ge=1, le=200)] = 50) -> list[RunSummary]:
         return run_service.list_runs(limit=limit)

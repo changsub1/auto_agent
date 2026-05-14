@@ -44,6 +44,7 @@ import {
 type Lang = "ko" | "en";
 type Status = "idle" | "ready" | "running" | "waiting" | "error" | "done" | "paused" | "queued";
 type TimelineFilter = "clean" | "agents" | "system" | "approvals" | "errors" | "all";
+type TimelineArtifactRef = TimelineEvent["artifacts"][number];
 
 const statusStyles: Record<Status, string> = {
   idle: "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-500 border-slate-200 dark:border-slate-700",
@@ -142,6 +143,63 @@ function matchesTimelineFilter(event: TimelineEvent, filter: TimelineFilter) {
   return true;
 }
 
+function isPlanResultEvent(event: TimelineEvent) {
+  const type = eventType(event);
+  const path = typeof event.raw.data?.path === "string" ? event.raw.data.path : "";
+  return (
+    type === "agent_output" &&
+    event.actor === "planner_a" &&
+    (event.title.toLowerCase().includes("final plan") || path.includes("planning/03_final_plan"))
+  );
+}
+
+function isQaResultEvent(event: TimelineEvent) {
+  const type = eventType(event);
+  const path = typeof event.raw.data?.path === "string" ? event.raw.data.path : "";
+  return (
+    (type === "agent_output" && event.actor.startsWith("qa_") && (event.title.toLowerCase().includes("review") || path.includes("qa_"))) ||
+    (type === "qa_completed" && event.title.toLowerCase().includes("llm qa")) ||
+    (type === "worker_checkpoint" && String(event.raw.data?.stage || "").includes("mechanical_qa"))
+  );
+}
+
+function latestEventId(events: TimelineEvent[], predicate: (event: TimelineEvent) => boolean) {
+  return [...events].reverse().find(predicate)?.id || "";
+}
+
+function isEvidenceArtifact(artifact: TimelineArtifactRef) {
+  const path = artifact.path.toLowerCase();
+  const name = artifact.name.toLowerCase();
+  return (
+    artifact.type === "image" ||
+    path.includes("/qa/") ||
+    path.includes("\\qa\\") ||
+    name.includes("qa_") ||
+    name.includes("scenario") ||
+    name.includes("screenshot") ||
+    name.includes("browser") ||
+    name.includes("console") ||
+    name.includes("syntax_report") ||
+    name.includes("executable_report")
+  );
+}
+
+function isTextEvidenceArtifact(artifact: TimelineArtifactRef) {
+  if (artifact.type !== "file" && artifact.type !== "log") return false;
+  return isEvidenceArtifact(artifact);
+}
+
+function timelinePreviewArtifacts(event: TimelineEvent) {
+  return event.artifacts
+    .filter((artifact) => artifact.type === "image" || isTextEvidenceArtifact(artifact))
+    .slice(0, 12);
+}
+
+function artifactImageSrc(content?: ArtifactContent) {
+  if (!content || content.encoding !== "base64") return "";
+  return `data:${content.media_type || "image/png"};base64,${content.content}`;
+}
+
 function StatusBadge({ status }: { status: Status }) {
   return (
     <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border ${statusStyles[status]}`} style={{ fontSize: 11 }}>
@@ -154,22 +212,17 @@ function StatusBadge({ status }: { status: Status }) {
 function TopBar({
   run,
   onBack,
-  onApprove,
-  onRequestChanges,
   onCancel,
-  onApproveQa,
   t,
 }: {
   run: RunDetail | null;
   onBack: () => void;
-  onApprove: () => void;
-  onRequestChanges: () => void;
   onCancel: () => void;
-  onApproveQa: () => void;
   t: (ko: string, en: string) => string;
 }) {
   const status = normalizeStatus(run?.status);
   const route = run?.route_mode || run?.state.routing?.mode || "local";
+  const waitingForUser = run?.status === "awaiting_plan_approval" || run?.status === "awaiting_qa_approval";
   return (
     <header className="h-14 px-4 border-b border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 backdrop-blur-sm flex items-center justify-between shrink-0">
       <div className="flex items-center gap-3 min-w-0">
@@ -195,17 +248,16 @@ function TopBar({
         </div>
       </div>
       <div className="flex items-center gap-1.5">
+        {waitingForUser && (
+          <span className="hidden lg:inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md border border-amber-200 bg-amber-50 text-amber-800" style={{ fontSize: 12 }}>
+            <AlertTriangle className="size-3.5" />
+            {t("타임라인의 결과 카드에서 승인하세요", "Approve from the timeline result card")}
+          </span>
+        )}
         <ActionBtn icon={<Pause className="size-3.5" />} label={t("일시정지", "Pause")} disabled />
         <ActionBtn icon={<Square className="size-3.5" />} label={t("중지", "Stop")} onClick={onCancel} />
         <ActionBtn icon={<RotateCw className="size-3.5" />} label={t("새로고침", "Refresh")} />
         <ActionBtn icon={<FolderOpen className="size-3.5" />} label={t("출력 폴더", "Output")} disabled />
-        <div className="w-px h-6 bg-slate-200 dark:bg-slate-700 mx-1" />
-        <button onClick={onRequestChanges} className="px-2.5 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1.5" style={{ fontSize: 12 }}>
-          <CircleSlash className="size-3.5" /> {t("변경 요청", "Request Changes")}
-        </button>
-        <button onClick={status === "waiting" && run?.status.includes("qa") ? onApproveQa : onApprove} className="px-2.5 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center gap-1.5 shadow-[0_1px_0_rgba(5,150,105,0.4),0_2px_6px_rgba(5,150,105,0.2)]" style={{ fontSize: 12 }}>
-          <CheckCircle2 className="size-3.5" /> {t("승인", "Approve")}
-        </button>
       </div>
     </header>
   );
@@ -293,6 +345,9 @@ function TimelineItem({
   onSelect,
   expanded,
   onToggle,
+  actionCard,
+  artifactContents,
+  onOpenArtifact,
   t,
 }: {
   event: TimelineEvent;
@@ -300,9 +355,15 @@ function TimelineItem({
   onSelect: () => void;
   expanded: boolean;
   onToggle: () => void;
+  actionCard?: ReactNode;
+  artifactContents: Record<string, ArtifactContent>;
+  onOpenArtifact: (path: string) => void;
   t: (ko: string, en: string) => string;
 }) {
   const status = normalizeStatus(event.status);
+  const imageArtifacts = event.artifacts.filter((artifact) => artifact.type === "image");
+  const textEvidenceArtifacts = event.artifacts.filter(isTextEvidenceArtifact).slice(0, 4);
+  const canExpand = !!event.summary || event.details.length > 0 || event.artifacts.length > 0;
   const accent =
     event.kind === "approval"
       ? "border-amber-300 bg-amber-50/70"
@@ -313,7 +374,15 @@ function TimelineItem({
   return (
     <div className="relative pl-6">
       <span className={`absolute left-1.5 top-3 size-2 rounded-full ${dot} ring-2 ring-white`} />
-      <button onClick={onSelect} className={`w-full text-left rounded-lg border ${accent} ${selected ? "ring-1 ring-indigo-300 border-indigo-300" : ""} hover:border-slate-300 dark:hover:border-slate-600 transition-colors shadow-[0_1px_0_rgba(15,23,42,0.02)]`}>
+      <div
+        onClick={onSelect}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(keyEvent) => {
+          if (keyEvent.key === "Enter" || keyEvent.key === " ") onSelect();
+        }}
+        className={`w-full text-left rounded-lg border ${accent} ${selected ? "ring-1 ring-indigo-300 border-indigo-300" : ""} hover:border-slate-300 dark:hover:border-slate-600 transition-colors shadow-[0_1px_0_rgba(15,23,42,0.02)]`}
+      >
         <div className="px-3 py-2 flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -324,12 +393,12 @@ function TimelineItem({
             </div>
             <div className="mt-0.5" style={{ fontSize: 13 }}>{event.title}</div>
             {event.summary && (
-              <div className="text-slate-600 dark:text-slate-500 mt-1 max-h-48 overflow-auto whitespace-pre-wrap" style={{ fontSize: 12, lineHeight: "1.45" }}>
+              <div className={`text-slate-600 dark:text-slate-500 mt-1 whitespace-pre-wrap ${expanded ? "" : "max-h-20 overflow-hidden"}`} style={{ fontSize: 12, lineHeight: "1.45" }}>
                 {event.summary}
               </div>
             )}
           </div>
-          {(event.details.length > 0 || event.artifacts.length > 0) && (
+          {canExpand && (
             <span role="button" onClick={(clickEvent) => { clickEvent.stopPropagation(); onToggle(); }} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-500">
               {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
             </span>
@@ -344,12 +413,155 @@ function TimelineItem({
             )}
             {event.artifacts.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
-                {event.artifacts.map((artifact) => <ArtifactChip key={artifact.path} name={artifact.name} type={artifact.type} />)}
+                {event.artifacts.map((artifact) => (
+                  <button
+                    key={artifact.path}
+                    type="button"
+                    onClick={(clickEvent) => {
+                      clickEvent.stopPropagation();
+                      onOpenArtifact(artifact.path);
+                    }}
+                    className="text-left"
+                  >
+                    <ArtifactChip name={artifact.name} type={artifact.type} />
+                  </button>
+                ))}
+              </div>
+            )}
+            {(imageArtifacts.length > 0 || textEvidenceArtifacts.length > 0) && (
+              <div className="rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-950/30 p-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="uppercase tracking-wider text-slate-500 dark:text-slate-500" style={{ fontSize: 10 }}>
+                    {t("QA 증거", "QA Evidence")}
+                  </span>
+                  <span className="font-mono text-slate-400 dark:text-slate-500" style={{ fontSize: 10 }}>
+                    {imageArtifacts.length} images · {textEvidenceArtifacts.length} files
+                  </span>
+                </div>
+                {imageArtifacts.length > 0 && (
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {imageArtifacts.slice(0, 6).map((artifact) => {
+                      const src = artifactImageSrc(artifactContents[artifact.path]);
+                      return (
+                        <button
+                          key={artifact.path}
+                          type="button"
+                          onClick={(clickEvent) => {
+                            clickEvent.stopPropagation();
+                            onOpenArtifact(artifact.path);
+                          }}
+                          className="group rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden text-left hover:border-indigo-300"
+                        >
+                          {src ? (
+                            <img alt={artifact.name} src={src} className="h-32 w-full object-cover bg-slate-100 dark:bg-slate-800" />
+                          ) : (
+                            <div className="h-32 w-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400">
+                              <ImageIcon className="size-5" />
+                            </div>
+                          )}
+                          <div className="px-1.5 py-1 font-mono truncate text-slate-600 dark:text-slate-400" style={{ fontSize: 10 }}>
+                            {artifact.name}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {textEvidenceArtifacts.map((artifact) => {
+                  const artifactContent = artifactContents[artifact.path];
+                  return (
+                    <button
+                      key={artifact.path}
+                      type="button"
+                      onClick={(clickEvent) => {
+                        clickEvent.stopPropagation();
+                        onOpenArtifact(artifact.path);
+                      }}
+                      className="block w-full text-left rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-indigo-300 overflow-hidden"
+                    >
+                      <div className="px-2 py-1 flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800">
+                        <span className="font-mono truncate text-slate-700 dark:text-slate-300" style={{ fontSize: 11 }}>{artifact.path}</span>
+                        {artifactContent?.truncated && <span className="text-amber-700" style={{ fontSize: 10 }}>truncated</span>}
+                      </div>
+                      <pre className="p-2 whitespace-pre-wrap text-slate-700 dark:text-slate-300 overflow-x-auto" style={{ fontSize: 11, lineHeight: "1.45" }}>
+                        {artifactContent?.encoding === "utf-8" ? artifactContent.content : "Loading evidence preview..."}
+                      </pre>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
         )}
-      </button>
+        {actionCard && (
+          <div className="border-t border-amber-100 dark:border-amber-900/50 px-3 py-2 bg-amber-50/70 dark:bg-amber-950/20">
+            {actionCard}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TimelineActionCard({
+  title,
+  description,
+  approveLabel,
+  requestLabel,
+  cancelLabel,
+  onApprove,
+  onRequest,
+  onCancel,
+}: {
+  title: string;
+  description: string;
+  approveLabel: string;
+  requestLabel: string;
+  cancelLabel: string;
+  onApprove: () => void;
+  onRequest: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <div className="inline-flex items-center gap-1.5 text-amber-900 dark:text-amber-200 font-medium" style={{ fontSize: 12 }}>
+          <AlertTriangle className="size-3.5" />
+          {title}
+        </div>
+        <div className="mt-0.5 text-amber-800/80 dark:text-amber-200/70" style={{ fontSize: 12 }}>
+          {description}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); onRequest(); }}
+          className="px-2.5 py-1.5 rounded-md border border-amber-300 bg-white text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1.5"
+          style={{ fontSize: 12 }}
+        >
+          <CircleSlash className="size-3.5" />
+          {requestLabel}
+        </button>
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); onCancel(); }}
+          className="px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+          style={{ fontSize: 12 }}
+        >
+          <Square className="size-3.5" />
+          {cancelLabel}
+        </button>
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); onApprove(); }}
+          className="px-2.5 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center gap-1.5 shadow-[0_1px_0_rgba(5,150,105,0.4),0_2px_6px_rgba(5,150,105,0.2)]"
+          style={{ fontSize: 12 }}
+        >
+          <CheckCircle2 className="size-3.5" />
+          {approveLabel}
+        </button>
+      </div>
     </div>
   );
 }
@@ -361,6 +573,129 @@ function ArtifactChip({ name, type }: { name: string; type: string }) {
       {icon}
       {name}
     </span>
+  );
+}
+
+function EventDetailPanel({
+  event,
+  artifacts,
+  content,
+  onOpenArtifact,
+  t,
+}: {
+  event: TimelineEvent | null;
+  artifacts: ArtifactInfo[];
+  content: ArtifactContent | null;
+  onOpenArtifact: (path: string) => void;
+  t: (ko: string, en: string) => string;
+}) {
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
+  const relatedArtifacts = event?.artifacts || [];
+  const detailLines = event?.details || [];
+  return (
+    <aside className="w-[360px] shrink-0 border-l border-slate-200/80 dark:border-slate-700/70 bg-gradient-to-b from-slate-50 to-indigo-50/40 dark:from-slate-900 dark:to-indigo-950/40 flex flex-col overflow-hidden">
+      <div className="px-3 py-2 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between">
+        <span className="uppercase tracking-wider text-slate-500 dark:text-slate-500" style={{ fontSize: 10 }}>{t("상세", "Details")}</span>
+        <FolderOpen className="size-3.5 text-slate-500 dark:text-slate-500" />
+      </div>
+      <div className="overflow-y-auto flex-1">
+        <Section title={t("선택 이벤트", "Selected Event")}>
+          <div className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/60 p-2">
+            <div className="flex items-center gap-2">
+              <span style={{ fontSize: 12 }}>{event?.who || "System"}</span>
+              <StatusBadge status={normalizeStatus(event?.status)} />
+            </div>
+            <div className="mt-0.5" style={{ fontSize: 13 }}>{event?.title || "No event selected"}</div>
+            {event?.summary && (
+              <div className="text-slate-600 dark:text-slate-500 mt-1 max-h-48 overflow-auto whitespace-pre-wrap" style={{ fontSize: 12, lineHeight: "1.45" }}>
+                {event.summary}
+              </div>
+            )}
+            {detailLines.length > 0 && (
+              <div className="mt-2 space-y-0.5 border-t border-slate-200/70 dark:border-slate-700/70 pt-2">
+                {detailLines.slice(0, 10).map((detail) => (
+                  <div key={detail} className="font-mono text-slate-500 dark:text-slate-500 truncate" style={{ fontSize: 10 }}>
+                    {detail}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Section>
+        <Section title={t("관련 파일", "Related Files")}>
+          {relatedArtifacts.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {relatedArtifacts.map((artifact) => (
+                <button
+                  key={artifact.path}
+                  type="button"
+                  onClick={() => artifact.type !== "directory" && onOpenArtifact(artifact.path)}
+                  className="text-left"
+                >
+                  <ArtifactChip name={artifact.name} type={artifact.type} />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="text-slate-500 dark:text-slate-500" style={{ fontSize: 12 }}>
+              {t("이 이벤트에 연결된 파일이 없습니다.", "No files are attached to this event.")}
+            </div>
+          )}
+        </Section>
+        <Section title={t("미리보기", "Preview")}>
+          {content ? (
+            <div className="space-y-1.5">
+              <div className="rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1">
+                <div className="font-mono truncate text-slate-700 dark:text-slate-300" style={{ fontSize: 11 }}>{content.path}</div>
+                <div className="flex items-center gap-2 text-slate-500 dark:text-slate-500" style={{ fontSize: 10 }}>
+                  <span>{formatBytes(content.size_bytes)}</span>
+                  <span>{content.encoding}</span>
+                  {content.truncated && <span className="text-amber-700">truncated</span>}
+                </div>
+              </div>
+              {content.encoding === "base64" && content.kind === "image" ? (
+                <img alt={content.name} src={`data:${content.media_type || "image/png"};base64,${content.content}`} className="w-full rounded border border-slate-200 dark:border-slate-700" />
+              ) : (
+                <pre className="rounded border border-slate-200 dark:border-slate-700 bg-slate-950 text-slate-100 p-2 overflow-auto max-h-[560px] font-mono whitespace-pre-wrap" style={{ fontSize: 11, lineHeight: "1.5" }}>{content.content}</pre>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-slate-300 dark:border-slate-700 bg-white/60 dark:bg-slate-900/50 p-3 text-slate-500 dark:text-slate-500" style={{ fontSize: 12 }}>
+              {t("타임라인 카드의 파일이나 스크린샷을 클릭하면 여기에서 크게 볼 수 있습니다.", "Click a timeline file or screenshot to inspect it here.")}
+            </div>
+          )}
+        </Section>
+        <Section title={t("전체 산출물", "All Artifacts")}>
+          <button
+            type="button"
+            onClick={() => setShowAllArtifacts((value) => !value)}
+            className="w-full rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-left hover:border-slate-300 dark:hover:border-slate-600 flex items-center justify-between"
+          >
+            <span className="text-slate-700 dark:text-slate-300" style={{ fontSize: 12 }}>
+              {showAllArtifacts ? t("전체 산출물 숨기기", "Hide full artifact list") : t("전체 산출물 보기", "Show full artifact list")}
+            </span>
+            <span className="font-mono text-slate-500 dark:text-slate-500" style={{ fontSize: 11 }}>{artifacts.length}</span>
+          </button>
+          {showAllArtifacts && (
+            <div className="mt-2 space-y-1 max-h-72 overflow-y-auto">
+              {artifacts.slice(0, 120).map((artifact) => (
+                <ArtifactRow key={artifact.path} artifact={artifact} onClick={() => artifact.kind !== "directory" && onOpenArtifact(artifact.path)} />
+              ))}
+              {artifacts.length === 0 && <div className="text-slate-500 dark:text-slate-500" style={{ fontSize: 12 }}>{t("산출물이 없습니다.", "No artifacts")}</div>}
+            </div>
+          )}
+          {showAllArtifacts && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {["state.json", "events.jsonl", "transcript.md", "qa_report.md"].map((path) => (
+                <button key={path} onClick={() => onOpenArtifact(path)} className="text-left">
+                  <ArtifactChip name={path} type={path.endsWith(".jsonl") ? "log" : "file"} />
+                </button>
+              ))}
+            </div>
+          )}
+        </Section>
+      </div>
+    </aside>
   );
 }
 
@@ -535,6 +870,7 @@ export function RunMonitorPage({
   const [logs, setLogs] = useState<LogFileInfo[]>([]);
   const [logTail, setLogTail] = useState<LogTail | null>(null);
   const [content, setContent] = useState<ArtifactContent | null>(null);
+  const [timelineContents, setTimelineContents] = useState<Record<string, ArtifactContent>>({});
   const [selectedAgent, setSelectedAgent] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<TimelineFilter>("clean");
@@ -580,12 +916,54 @@ export function RunMonitorPage({
     };
   }, [refresh]);
 
+  useEffect(() => {
+    setTimelineContents({});
+    setContent(null);
+  }, [runId]);
+
   const rows = useMemo(() => buildAgentRows(run, events), [run, events]);
   const visibleEvents = useMemo(
     () => events.filter((event) => matchesTimelineFilter(event, timelineFilter)),
     [events, timelineFilter],
   );
   const selectedEvent = visibleEvents.find((event) => event.id === selectedEventId) || visibleEvents[visibleEvents.length - 1] || events[events.length - 1] || null;
+  const planActionEventId = run?.status === "awaiting_plan_approval" ? latestEventId(visibleEvents, isPlanResultEvent) || latestEventId(events, isPlanResultEvent) : "";
+  const qaActionEventId = run?.status === "awaiting_qa_approval" ? latestEventId(visibleEvents, isQaResultEvent) || latestEventId(events, isQaResultEvent) : "";
+
+  useEffect(() => {
+    if (!runId) return;
+    const expandedOrSelected = visibleEvents.filter((event) => expanded[event.id] || event.id === selectedEventId);
+    const paths = Array.from(
+      new Set(expandedOrSelected.flatMap((event) => timelinePreviewArtifacts(event).map((artifact) => artifact.path))),
+    ).filter((path) => !timelineContents[path]);
+    if (paths.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      paths.slice(0, 12).map(async (path) => {
+        try {
+          return [path, await readArtifact(runId, path)] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      const loaded = results.filter((item): item is readonly [string, ArtifactContent] => item !== null);
+      if (loaded.length === 0) return;
+      setTimelineContents((current) => {
+        const next = { ...current };
+        for (const [path, artifactContent] of loaded) {
+          next[path] = artifactContent;
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, runId, selectedEventId, timelineContents, visibleEvents]);
 
   async function runAction(action: () => Promise<RunDetail>) {
     if (!runId) return;
@@ -602,7 +980,9 @@ export function RunMonitorPage({
   async function openArtifact(path: string) {
     if (!runId) return;
     try {
-      setContent(await readArtifact(runId, path));
+      const artifactContent = await readArtifact(runId, path);
+      setContent(artifactContent);
+      setTimelineContents((current) => ({ ...current, [path]: artifactContent }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -630,13 +1010,7 @@ export function RunMonitorPage({
       <TopBar
         run={run}
         onBack={onBack}
-        onApprove={() => runId && runAction(() => approveRun(runId))}
-        onRequestChanges={() => {
-          const feedback = window.prompt(t("변경 요청 내용을 입력하세요.", "Enter change request feedback.")) || "";
-          if (feedback.trim() && runId) runAction(() => requestChanges(runId, feedback));
-        }}
         onCancel={() => runId && runAction(() => cancelRun(runId))}
-        onApproveQa={() => runId && runAction(() => approveQa(runId))}
         t={t}
       />
       <div className="flex-1 flex min-h-0">
@@ -667,6 +1041,46 @@ export function RunMonitorPage({
           <div className="flex-1 overflow-y-auto px-4 py-3 relative">
             <div className="absolute left-[22px] top-3 bottom-3 w-px bg-slate-200 dark:bg-slate-700" />
             <div className="space-y-2">
+              {run?.status === "awaiting_plan_approval" && runId && !visibleEvents.some((event) => event.id === planActionEventId) && (
+                <div className="relative pl-6">
+                  <span className="absolute left-1.5 top-3 size-2 rounded-full bg-amber-500 ring-2 ring-white" />
+                  <div className="rounded-lg border border-amber-300 bg-amber-50/70 shadow-[0_1px_0_rgba(15,23,42,0.02)] px-3 py-2">
+                    <TimelineActionCard
+                      title={t("기획 승인 대기", "Plan approval required")}
+                      description={t("이 기획안으로 개발을 진행할지 결정하세요.", "Decide whether to proceed with this plan.")}
+                      approveLabel={t("기획 승인", "Approve Plan")}
+                      requestLabel={t("수정 요청", "Request Changes")}
+                      cancelLabel={t("중지", "Stop")}
+                      onApprove={() => runAction(() => approveRun(runId))}
+                      onRequest={() => {
+                        const feedback = window.prompt(t("변경 요청 내용을 입력하세요.", "Enter change request feedback.")) || "";
+                        if (feedback.trim()) runAction(() => requestChanges(runId, feedback));
+                      }}
+                      onCancel={() => runAction(() => cancelRun(runId))}
+                    />
+                  </div>
+                </div>
+              )}
+              {run?.status === "awaiting_qa_approval" && runId && !visibleEvents.some((event) => event.id === qaActionEventId) && (
+                <div className="relative pl-6">
+                  <span className="absolute left-1.5 top-3 size-2 rounded-full bg-amber-500 ring-2 ring-white" />
+                  <div className="rounded-lg border border-amber-300 bg-amber-50/70 shadow-[0_1px_0_rgba(15,23,42,0.02)] px-3 py-2">
+                    <TimelineActionCard
+                      title={t("QA 확인 대기", "QA approval required")}
+                      description={t("QA 결과와 스크린샷을 확인하고 최종 승인 또는 수정 요청을 선택하세요.", "Review QA evidence and choose final approval or a fix request.")}
+                      approveLabel={t("최종 승인", "Approve QA")}
+                      requestLabel={t("QA 수정 요청", "Request Fix")}
+                      cancelLabel={t("중지", "Stop")}
+                      onApprove={() => runAction(() => approveQa(runId))}
+                      onRequest={() => {
+                        const feedback = window.prompt(t("QA 수정 요청 내용을 입력하세요.", "Enter QA fix feedback.")) || "";
+                        if (feedback.trim()) runAction(() => requestQaFix(runId, feedback));
+                      }}
+                      onCancel={() => runAction(() => cancelRun(runId))}
+                    />
+                  </div>
+                </div>
+              )}
               {visibleEvents.map((event) => (
                 <TimelineItem
                   key={event.id}
@@ -675,6 +1089,39 @@ export function RunMonitorPage({
                   onSelect={() => setSelectedEventId(event.id)}
                   expanded={!!expanded[event.id]}
                   onToggle={() => setExpanded((state) => ({ ...state, [event.id]: !state[event.id] }))}
+                  artifactContents={timelineContents}
+                  onOpenArtifact={openArtifact}
+                  actionCard={
+                    event.id === planActionEventId && runId ? (
+                      <TimelineActionCard
+                        title={t("기획 승인 대기", "Plan approval required")}
+                        description={t("이 기획안으로 개발을 진행할지 결정하세요.", "Decide whether to proceed with this plan.")}
+                        approveLabel={t("기획 승인", "Approve Plan")}
+                        requestLabel={t("수정 요청", "Request Changes")}
+                        cancelLabel={t("중지", "Stop")}
+                        onApprove={() => runAction(() => approveRun(runId))}
+                        onRequest={() => {
+                          const feedback = window.prompt(t("변경 요청 내용을 입력하세요.", "Enter change request feedback.")) || "";
+                          if (feedback.trim()) runAction(() => requestChanges(runId, feedback));
+                        }}
+                        onCancel={() => runAction(() => cancelRun(runId))}
+                      />
+                    ) : event.id === qaActionEventId && runId ? (
+                      <TimelineActionCard
+                        title={t("QA 확인 대기", "QA approval required")}
+                        description={t("QA 결과와 스크린샷을 확인하고 최종 승인 또는 수정 요청을 선택하세요.", "Review QA evidence and choose final approval or a fix request.")}
+                        approveLabel={t("최종 승인", "Approve QA")}
+                        requestLabel={t("QA 수정 요청", "Request Fix")}
+                        cancelLabel={t("중지", "Stop")}
+                        onApprove={() => runAction(() => approveQa(runId))}
+                        onRequest={() => {
+                          const feedback = window.prompt(t("QA 수정 요청 내용을 입력하세요.", "Enter QA fix feedback.")) || "";
+                          if (feedback.trim()) runAction(() => requestQaFix(runId, feedback));
+                        }}
+                        onCancel={() => runAction(() => cancelRun(runId))}
+                      />
+                    ) : null
+                  }
                   t={t}
                 />
               ))}
@@ -706,7 +1153,7 @@ export function RunMonitorPage({
             {error && <div className="mt-2 text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1" style={{ fontSize: 12 }}>{error}</div>}
           </div>
         </main>
-        <ArtifactPanel event={selectedEvent} artifacts={artifacts} content={content} onOpenArtifact={openArtifact} t={t} />
+        <EventDetailPanel event={selectedEvent} artifacts={artifacts} content={content} onOpenArtifact={openArtifact} t={t} />
       </div>
     </div>
   );

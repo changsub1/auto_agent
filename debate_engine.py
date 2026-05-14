@@ -749,6 +749,8 @@ class DebateEngine:
                 "executable_status": qa_result.executable_status,
                 "executable_app_type": qa_result.executable_app_type,
                 "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+                "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+                "report_path": store.to_relative(qa_result.report_path),
             },
         )
         return qa_result, generated_app_dir, final_agent_result
@@ -871,6 +873,8 @@ class DebateEngine:
                 "executable_status": qa_result.executable_status,
                 "executable_app_type": qa_result.executable_app_type,
                 "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+                "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+                "report_path": store.to_relative(qa_result.report_path),
             },
         )
         return qa_result, generated_app_dir, final_agent_result
@@ -948,6 +952,8 @@ class DebateEngine:
                 "executable_status": qa_result.executable_status,
                 "executable_app_type": qa_result.executable_app_type,
                 "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+                "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+                "report_path": store.to_relative(qa_result.report_path),
             },
         )
         return qa_result, generated_app_dir, fix_result
@@ -1031,6 +1037,8 @@ class DebateEngine:
                 "executable_status": qa_result.executable_status,
                 "executable_app_type": qa_result.executable_app_type,
                 "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+                "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+                "report_path": store.to_relative(qa_result.report_path),
             },
         )
         return qa_result, generated_app_dir, fix_result

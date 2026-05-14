@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -15,6 +17,7 @@ import re
 from agents import ArchitectAgent, CodeAgent, IntegratorAgent, PlannerAgentA, PlannerAgentB, QAAgent, ScaffoldAgent
 from codex_runner import CodexExecutionError, CodexProcessHandle, CodexResult, run_codex_result, run_codex_result_async
 from executable_qa import run_executable_qa
+from prompt_templates import load_agent_system_prompt
 from parallel_workflow import (
     CodeAgentAssignment,
     assign_code_agent_tasks,
@@ -146,13 +149,15 @@ def run_planning_stage(
     planner_a = PlannerAgentA(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, "planner_a"),
+        system_prompt=_agent_system_prompt(config, "planner_a"),
+        reference_markdown=_agent_skill_markdown(config, "planner_a"),
         **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = _call_codex_with_resume(
         lambda session_id: planner_a.create_initial_plan(planning_request, run_dir, session_id=session_id),
         store.get_agent_session_id("planner_a"),
     )
+    _snapshot_final_prompts_from_logs(store)
     draft_path = store.write_artifact(
         "planning/01_planner_a_draft.md",
         draft_result.stdout,
@@ -175,7 +180,8 @@ def run_planning_stage(
         planner_b = PlannerAgentB(
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            reference_markdown=_agent_reference_markdown(config, "planner_b"),
+            system_prompt=_agent_system_prompt(config, "planner_b"),
+            reference_markdown=_agent_skill_markdown(config, "planner_b"),
             **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = _call_codex_with_resume(
@@ -188,6 +194,7 @@ def run_planning_stage(
             ),
             store.get_agent_session_id("planner_b"),
         )
+        _snapshot_final_prompts_from_logs(store)
         review_text = review_result.stdout
         review_path = store.write_artifact(
             "planning/02_planner_b_review.md",
@@ -214,6 +221,7 @@ def run_planning_stage(
             run_dir=run_dir,
             logs_dir=logs_dir,
         )
+        _snapshot_final_prompts_from_logs(store)
         planner_c_path = store.write_artifact(
             "planning/02b_planner_c_risk_review.md",
             planner_c_result.stdout,
@@ -244,6 +252,7 @@ def run_planning_stage(
             ),
             store.get_agent_session_id("planner_a"),
         )
+        _snapshot_final_prompts_from_logs(store)
         final_text = final_result.stdout
         store.update_agent_session(
             "planner_a",
@@ -296,7 +305,8 @@ async def run_planning_stage_async(
     planner_a = PlannerAgentA(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, "planner_a"),
+        system_prompt=_agent_system_prompt(config, "planner_a"),
+        reference_markdown=_agent_skill_markdown(config, "planner_a"),
         **_agent_run_kwargs(config, "planner_a", config.planner_a_codex_home),
     )
     draft_result = await _call_codex_with_resume_async(
@@ -308,6 +318,7 @@ async def run_planning_stage_async(
         ),
         store.get_agent_session_id("planner_a"),
     )
+    _snapshot_final_prompts_from_logs(store)
     draft_path = store.write_artifact(
         "planning/01_planner_a_draft.md",
         draft_result.stdout,
@@ -330,7 +341,8 @@ async def run_planning_stage_async(
         planner_b = PlannerAgentB(
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            reference_markdown=_agent_reference_markdown(config, "planner_b"),
+            system_prompt=_agent_system_prompt(config, "planner_b"),
+            reference_markdown=_agent_skill_markdown(config, "planner_b"),
             **_agent_run_kwargs(config, "planner_b", config.planner_b_codex_home),
         )
         review_result = await _call_codex_with_resume_async(
@@ -344,6 +356,7 @@ async def run_planning_stage_async(
             ),
             store.get_agent_session_id("planner_b"),
         )
+        _snapshot_final_prompts_from_logs(store)
         review_text = review_result.stdout
         review_path = store.write_artifact(
             "planning/02_planner_b_review.md",
@@ -371,6 +384,7 @@ async def run_planning_stage_async(
             logs_dir=logs_dir,
             process_started=_agent_process_started(process_started, "planner_c"),
         )
+        _snapshot_final_prompts_from_logs(store)
         planner_c_path = store.write_artifact(
             "planning/02b_planner_c_risk_review.md",
             planner_c_result.stdout,
@@ -402,6 +416,7 @@ async def run_planning_stage_async(
             ),
             store.get_agent_session_id("planner_a"),
         )
+        _snapshot_final_prompts_from_logs(store)
         final_text = final_result.stdout
         store.update_agent_session(
             "planner_a",
@@ -443,6 +458,8 @@ def _run_contract(
     architect = ArchitectAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        system_prompt=_agent_system_prompt(config, "architect"),
+        reference_markdown=_agent_skill_markdown(config, "architect"),
         **_agent_run_kwargs(config, "architect", config.architect_codex_home),
     )
     result = _call_codex_with_resume(
@@ -456,6 +473,7 @@ def _run_contract(
         ),
         store.get_agent_session_id("architect"),
     )
+    _snapshot_final_prompts_from_logs(store)
     contract_paths = normalize_contract_bundle(contract_dir, config.user_request, plan_artifacts["final_plan"])
     store.record_artifact("contract_dir", contract_dir)
     for path in contract_paths:
@@ -493,6 +511,8 @@ async def run_contract_stage_async(
     architect = ArchitectAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        system_prompt=_agent_system_prompt(config, "architect"),
+        reference_markdown=_agent_skill_markdown(config, "architect"),
         **_agent_run_kwargs(config, "architect", config.architect_codex_home),
     )
     result = await _call_codex_with_resume_async(
@@ -507,6 +527,7 @@ async def run_contract_stage_async(
         ),
         store.get_agent_session_id("architect"),
     )
+    _snapshot_final_prompts_from_logs(store)
     contract_paths = normalize_contract_bundle(contract_dir, config.user_request, plan_artifacts["final_plan"])
     store.record_artifact("contract_dir", contract_dir)
     for path in contract_paths:
@@ -542,6 +563,8 @@ def _run_scaffold(
     scaffold = ScaffoldAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        system_prompt=_agent_system_prompt(config, "scaffold"),
+        reference_markdown=_agent_skill_markdown(config, "scaffold"),
         **_agent_run_kwargs(config, "scaffold", config.scaffold_codex_home),
     )
     result = _call_codex_with_resume(
@@ -553,6 +576,7 @@ def _run_scaffold(
         ),
         store.get_agent_session_id("scaffold"),
     )
+    _snapshot_final_prompts_from_logs(store)
     store.update_agent_session(
         "scaffold",
         session_id=result.session_id,
@@ -583,6 +607,8 @@ async def run_scaffold_stage_async(
     scaffold = ScaffoldAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
+        system_prompt=_agent_system_prompt(config, "scaffold"),
+        reference_markdown=_agent_skill_markdown(config, "scaffold"),
         **_agent_run_kwargs(config, "scaffold", config.scaffold_codex_home),
     )
     result = await _call_codex_with_resume_async(
@@ -595,6 +621,7 @@ async def run_scaffold_stage_async(
         ),
         store.get_agent_session_id("scaffold"),
     )
+    _snapshot_final_prompts_from_logs(store)
     store.update_agent_session(
         "scaffold",
         session_id=result.session_id,
@@ -660,6 +687,7 @@ async def run_code_agents_stage_async(
             for assignment in assignments
         ]
     )
+    _snapshot_final_prompts_from_logs(store)
     for assignment, code_result in zip(assignments, code_results, strict=True):
         output_path = store.write_artifact(
             f"agent_outputs/{assignment.agent_id}_summary.md",
@@ -717,7 +745,8 @@ async def run_integration_stage_async(
     integrator = IntegratorAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, "integrator"),
+        system_prompt=_agent_system_prompt(config, "integrator"),
+        reference_markdown=_agent_skill_markdown(config, "integrator"),
         **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     integration_result = await _call_codex_with_resume_async(
@@ -732,6 +761,7 @@ async def run_integration_stage_async(
         ),
         store.get_agent_session_id("integrator"),
     )
+    _snapshot_final_prompts_from_logs(store)
     store.update_agent_session(
         "integrator",
         session_id=integration_result.session_id,
@@ -804,9 +834,97 @@ def run_mechanical_qa_stage(
             "executable_status": qa_result.executable_status,
             "executable_app_type": qa_result.executable_app_type,
             "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+            "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+            "report_path": store.to_relative(qa_result.report_path),
         },
     )
     return qa_result
+
+
+async def run_llm_qa_scenario_plan_stage_async(
+    run_dir: Path,
+    logs_dir: Path,
+    store: StateStore,
+    config: LocalRunConfig,
+    contract_dir: Path,
+    generated_app_dir: Path,
+    *,
+    attempt_index: int = 0,
+    process_started: Callable[[str, CodexProcessHandle], None] | None = None,
+) -> Path | None:
+    qa_agent_count = max(0, config.qa_agent_count)
+    if qa_agent_count <= 0:
+        return None
+
+    store.set_status("llm_qa_planning")
+    contract_bundle = render_contract_bundle(contract_dir) if contract_dir.exists() else ""
+    generated_app_listing = list_workspace_files(generated_app_dir)
+    attempt_dir = run_dir / "qa" / f"attempt_{attempt_index:02d}"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+
+    agent_id = "qa_1"
+    codex_home = config.qa_agent_codex_homes[0] if config.qa_agent_codex_homes else None
+    agent = QAAgent(
+        agent_id=agent_id,
+        logs_dir=logs_dir,
+        timeout=config.timeout_seconds,
+        system_prompt=_agent_system_prompt(config, agent_id),
+        reference_markdown=_agent_skill_markdown(config, agent_id),
+        **_agent_run_kwargs(config, agent_id, codex_home),
+    )
+    result = await agent.plan_scenarios_async(
+        config.user_request,
+        contract_bundle,
+        generated_app_listing,
+        run_dir,
+        session_id=store.get_agent_session_id(agent_id),
+        process_started=_agent_process_started(process_started, agent_id),
+    )
+    _snapshot_final_prompts_from_logs(store)
+
+    plan_path = store.write_artifact(
+        f"qa/attempt_{attempt_index:02d}/{agent_id}_scenario_plan.md",
+        result.stdout,
+        artifact_name=f"{agent_id}_scenario_plan",
+    )
+    store.update_agent_session(
+        agent_id,
+        session_id=result.session_id,
+        codex_home=_agent_codex_home(config, agent_id, codex_home),
+        model=result.model,
+        reasoning_effort=result.reasoning_effort,
+        last_step=f"scenario_plan_attempt_{attempt_index}",
+    )
+
+    scenario_payload, parse_error = _extract_json_object(result.stdout)
+    scenario_path: Path | None = None
+    event_data: dict[str, Any] = {
+        "path": store.to_relative(plan_path),
+        **_session_event_data(result),
+    }
+    if scenario_payload is None:
+        error_path = store.write_artifact(
+            f"qa/attempt_{attempt_index:02d}/qa_scenario_plan_error.md",
+            f"# QA Scenario Plan Error\n\n{parse_error or 'No JSON object found.'}\n",
+            artifact_name=f"qa_scenario_plan_error_{attempt_index:02d}",
+        )
+        event_data.update({"scenario_status": "invalid", "error_path": store.to_relative(error_path)})
+    else:
+        scenario_path = store.write_artifact(
+            f"qa/attempt_{attempt_index:02d}/qa_scenarios.json",
+            json.dumps(scenario_payload, ensure_ascii=False, indent=2) + "\n",
+            artifact_name=f"qa_scenarios_{attempt_index:02d}",
+        )
+        event_data.update({"scenario_status": "ready", "scenario_path": store.to_relative(scenario_path)})
+
+    store.append_event(
+        "agent_output",
+        agent_id,
+        "QA Agent scenario plan completed",
+        event_data,
+    )
+    store.append_transcript(f"{agent_id} Scenario Plan", result.stdout)
+    return scenario_path
 
 
 async def run_llm_qa_stage_async(
@@ -816,12 +934,19 @@ async def run_llm_qa_stage_async(
     config: LocalRunConfig,
     contract_dir: Path,
     generated_app_dir: Path,
-    mechanical_result: QAResult,
+    mechanical_result: QAResult | None = None,
     *,
     attempt_index: int = 0,
     running_status: str = "llm_qa_running",
     process_started: Callable[[str, CodexProcessHandle], None] | None = None,
 ) -> QAResult:
+    if mechanical_result is None:
+        mechanical_result = make_agentic_qa_baseline_result(
+            run_dir,
+            generated_app_dir,
+            attempt_index=attempt_index,
+        )
+
     qa_agent_count = max(0, config.qa_agent_count)
     if qa_agent_count <= 0:
         return mechanical_result
@@ -832,90 +957,177 @@ async def run_llm_qa_stage_async(
     attempt_dir = run_dir / "qa" / f"attempt_{attempt_index:02d}"
     attempt_dir.mkdir(parents=True, exist_ok=True)
 
-    async def run_one(index: int) -> tuple[str, str | None, CodexResult]:
+    async def run_one(index: int) -> dict[str, Any]:
         agent_id = f"qa_{index}"
         codex_home = config.qa_agent_codex_homes[(index - 1) % len(config.qa_agent_codex_homes)] if config.qa_agent_codex_homes else None
+        workspace_dir = _prepare_qa_workspace(
+            run_dir=run_dir,
+            attempt_dir=attempt_dir,
+            generated_app_dir=generated_app_dir,
+            agent_id=agent_id,
+            user_request=config.user_request,
+            contract_bundle=contract_bundle,
+            generated_app_listing=generated_app_listing,
+            mechanical_qa_report=mechanical_result.report_markdown,
+        )
         agent = QAAgent(
             agent_id=agent_id,
             logs_dir=logs_dir,
             timeout=config.timeout_seconds,
-            reference_markdown=_agent_reference_markdown(config, agent_id),
+            system_prompt=_agent_system_prompt(config, agent_id),
+            reference_markdown=_agent_skill_markdown(config, agent_id),
             **_agent_run_kwargs(config, agent_id, codex_home),
         )
-        result = await agent.review_result_async(
-            config.user_request,
-            contract_bundle,
-            generated_app_listing,
-            mechanical_result.report_markdown,
-            mechanical_result.screenshots,
-            run_dir,
-            session_id=store.get_agent_session_id(agent_id),
-            process_started=_agent_process_started(process_started, agent_id),
-        )
-        return agent_id, codex_home, result
+        agent_error = ""
+        try:
+            result = await agent.run_workspace_qa_async(
+                config.user_request,
+                contract_bundle,
+                generated_app_listing,
+                mechanical_result.report_markdown,
+                workspace_dir,
+                session_id=store.get_agent_session_id(agent_id),
+                process_started=_agent_process_started(process_started, agent_id),
+                image_paths=mechanical_result.screenshots,
+            )
+        except CodexExecutionError as exc:
+            agent_error = str(exc)
+            _write_workspace_fallback_verdict(
+                workspace_dir,
+                status="FAIL",
+                summary=f"QA workspace agent failed before producing a usable verdict: {exc}",
+            )
+            result = CodexResult(
+                stdout=exc.stdout or f"QA_STATUS: FAIL\n\n{exc}",
+                stderr=exc.stderr,
+                returncode=exc.returncode or 1,
+                session_id=store.get_agent_session_id(agent_id),
+                resumed_session_id=store.get_agent_session_id(agent_id),
+                model=_agent_model(config, agent_id),
+                reasoning_effort=_agent_reasoning_effort(config, agent_id),
+                effective_approval=None,
+                effective_sandbox=None,
+            )
+        return {
+            "agent_id": agent_id,
+            "codex_home": codex_home,
+            "workspace_dir": workspace_dir,
+            "result": result,
+            "agent_error": agent_error,
+        }
 
     reviews = await asyncio.gather(*[run_one(index) for index in range(1, qa_agent_count + 1)])
+    _snapshot_final_prompts_from_logs(store)
     review_sections: list[str] = []
     failed_reviews: list[str] = []
     artifact_paths = list(mechanical_result.artifact_paths)
+    screenshots = list(mechanical_result.screenshots)
+    affected_paths = list(mechanical_result.affected_paths)
+    suspected_owners = list(mechanical_result.suspected_owners)
 
-    for agent_id, codex_home, result in reviews:
-        review_path = store.write_artifact(
-            f"qa/attempt_{attempt_index:02d}/{agent_id}_review.md",
-            result.stdout,
-            artifact_name=f"{agent_id}_review",
+    for review in reviews:
+        agent_id = str(review["agent_id"])
+        codex_home = review["codex_home"]
+        result = review["result"]
+        workspace_dir = Path(review["workspace_dir"])
+        agent_error = str(review.get("agent_error") or "")
+
+        output_path = store.write_artifact(
+            f"qa/attempt_{attempt_index:02d}/{agent_id}_workspace_qa.md",
+            result.stdout or agent_error or "QA workspace agent produced no stdout.",
+            artifact_name=f"{agent_id}_workspace_qa",
         )
-        artifact_paths.append(review_path)
-        status = _parse_qa_status(result.stdout)
-        affected_paths = _extract_affected_paths(result.stdout)
-        suspected_owners = _extract_suspected_owners(result.stdout)
+        verdict, verdict_path, verdict_error = _load_or_create_workspace_verdict(workspace_dir)
+        workspace_screenshots = _collect_qa_workspace_screenshots(workspace_dir)
+        workspace_artifacts = _collect_qa_workspace_artifacts(workspace_dir)
+        hard_policy_errors = _workspace_hard_policy_errors(
+            verdict=verdict,
+            workspace_dir=workspace_dir,
+            mechanical_result=mechanical_result,
+            screenshots=[*screenshots, *workspace_screenshots],
+        )
+        if hard_policy_errors and _workspace_verdict_status(verdict) == "PASS":
+            _downgrade_workspace_verdict(verdict_path, verdict, hard_policy_errors)
+            verdict, _, verdict_error = _load_or_create_workspace_verdict(workspace_dir)
+
+        status = _workspace_verdict_status(verdict)
         if status != "PASS":
             failed_reviews.append(f"{agent_id}: {status}")
+        if hard_policy_errors:
+            failed_reviews.extend(f"{agent_id}: hard policy - {error}" for error in hard_policy_errors)
+        if verdict_error:
+            failed_reviews.append(f"{agent_id}: verdict error - {verdict_error}")
+
+        artifact_paths.extend([output_path, *workspace_artifacts])
+        screenshots.extend(workspace_screenshots)
+        affected_paths = _merge_unique(
+            [
+                *affected_paths,
+                *_workspace_verdict_list(verdict, "affected_paths"),
+                *_extract_affected_paths(result.stdout),
+            ]
+        )
+        suspected_owners = _merge_unique(
+            [
+                *suspected_owners,
+                *_workspace_verdict_list(verdict, "suspected_owners"),
+                *_extract_suspected_owners(result.stdout),
+            ]
+        )
         store.update_agent_session(
             agent_id,
             session_id=result.session_id,
             codex_home=_agent_codex_home(config, agent_id, codex_home),
             model=result.model,
             reasoning_effort=result.reasoning_effort,
-            last_step=f"review_attempt_{attempt_index}",
+            last_step=f"workspace_qa_attempt_{attempt_index}",
         )
+        findings_path = workspace_dir / "evidence" / "qa_findings.md"
+        command_log_path = workspace_dir / "evidence" / "command_log.jsonl"
         store.append_event(
             "agent_output",
             agent_id,
-            "QA Agent review completed",
+            "QA Workspace Agent completed",
             {
-                "path": store.to_relative(review_path),
+                "path": store.to_relative(output_path),
+                "workspace_path": store.to_relative(workspace_dir),
+                "verdict_path": store.to_relative(verdict_path),
+                "findings_path": store.to_relative(findings_path) if findings_path.exists() else None,
+                "command_log_path": store.to_relative(command_log_path) if command_log_path.exists() else None,
                 "qa_status": status,
-                "affected_paths": affected_paths,
-                "suspected_owners": suspected_owners,
+                "verdict_error": verdict_error,
+                "hard_policy_errors": hard_policy_errors,
+                "affected_paths": _workspace_verdict_list(verdict, "affected_paths"),
+                "suspected_owners": _workspace_verdict_list(verdict, "suspected_owners"),
+                "screenshots": [store.to_relative(path) for path in workspace_screenshots],
+                "artifact_paths": [store.to_relative(path) for path in [output_path, *workspace_artifacts]],
                 **_session_event_data(result),
             },
         )
-        store.append_transcript(f"{agent_id} Review", result.stdout)
-        review_sections.append(f"### {agent_id} Review\n\n{result.stdout.strip()}")
+        store.append_transcript(f"{agent_id} Workspace QA", result.stdout or agent_error)
+        review_sections.append(
+            _workspace_review_section(
+                agent_id=agent_id,
+                workspace_dir=workspace_dir,
+                verdict=verdict,
+                verdict_path=verdict_path,
+                verdict_error=verdict_error,
+                hard_policy_errors=hard_policy_errors,
+                agent_output=result.stdout,
+                agent_error=agent_error,
+            )
+        )
 
     llm_ok = not failed_reviews
     ok = mechanical_result.ok and llm_ok
     llm_error_log = "\n".join(failed_reviews)
     error_log = "\n\n".join(part for part in [mechanical_result.error_log, llm_error_log] if part)
-    affected_paths = _merge_unique(
-        [
-            *mechanical_result.affected_paths,
-            *[path for section in review_sections for path in _extract_affected_paths(section)],
-        ]
-    )
-    suspected_owners = _merge_unique(
-        [
-            *mechanical_result.suspected_owners,
-            *[owner for section in review_sections for owner in _extract_suspected_owners(section)],
-        ]
-    )
     status = "PASS" if ok else "FAIL"
     report = "\n".join(
         [
             mechanical_result.report_markdown.strip(),
             "",
-            "## Codex QA Agent Reviews",
+            "## Codex QA Workspace Agent Reviews",
             "",
             f"- Status: {status}",
             f"- QA agent count: {qa_agent_count}",
@@ -932,7 +1144,7 @@ async def run_llm_qa_stage_async(
         error_log=error_log,
         report_path=mechanical_result.report_path,
         report_markdown=report,
-        screenshots=mechanical_result.screenshots,
+        screenshots=screenshots,
         artifact_paths=artifact_paths,
         executable_status=mechanical_result.executable_status,
         executable_app_type=mechanical_result.executable_app_type,
@@ -953,6 +1165,8 @@ async def run_llm_qa_stage_async(
             "affected_paths": qa_result.affected_paths,
             "suspected_owners": qa_result.suspected_owners,
             "screenshots": [store.to_relative(path) for path in qa_result.screenshots],
+            "artifact_paths": [store.to_relative(path) for path in qa_result.artifact_paths],
+            "report_path": store.to_relative(qa_result.report_path),
         },
     )
     return qa_result
@@ -1001,6 +1215,7 @@ async def run_targeted_fix_stage_async(
             session_id=store.get_agent_session_id(assignment.agent_id),
             process_started=_agent_process_started(process_started, assignment.agent_id),
         )
+        _snapshot_final_prompts_from_logs(store)
         output_path = store.write_artifact(
             f"agent_outputs/{assignment.agent_id}_fix_{iteration:02d}.md",
             result.stdout,
@@ -1043,7 +1258,8 @@ async def run_targeted_fix_stage_async(
     integrator = IntegratorAgent(
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, "integrator"),
+        system_prompt=_agent_system_prompt(config, "integrator"),
+        reference_markdown=_agent_skill_markdown(config, "integrator"),
         **_agent_run_kwargs(config, "integrator", config.integrator_codex_home),
     )
     repair_result = await _call_codex_with_resume_async(
@@ -1060,6 +1276,7 @@ async def run_targeted_fix_stage_async(
         ),
         store.get_agent_session_id("integrator"),
     )
+    _snapshot_final_prompts_from_logs(store)
     store.update_agent_session(
         "integrator",
         session_id=repair_result.session_id,
@@ -1162,6 +1379,7 @@ async def run_single_code_stage_async(
         session_id=store.get_agent_session_id(assignment.agent_id),
         process_started=_agent_process_started(process_started, assignment.agent_id),
     )
+    _snapshot_final_prompts_from_logs(store)
     output_path = store.write_artifact(
         "agent_outputs/code_1_summary.md",
         result.stdout,
@@ -1222,6 +1440,7 @@ async def run_single_code_fix_stage_async(
         session_id=store.get_agent_session_id(assignment.agent_id),
         process_started=_agent_process_started(process_started, assignment.agent_id),
     )
+    _snapshot_final_prompts_from_logs(store)
     output_path = store.write_artifact(
         f"agent_outputs/code_1_fix_{iteration:02d}.md",
         result.stdout,
@@ -1260,7 +1479,8 @@ async def _run_code_agent_assignment_async(
         agent_id=assignment.agent_id,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, assignment.agent_id),
+        system_prompt=_agent_system_prompt(config, assignment.agent_id),
+        reference_markdown=_agent_skill_markdown(config, assignment.agent_id),
         **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
@@ -1291,7 +1511,8 @@ async def _run_code_agent_fix_async(
         agent_id=assignment.agent_id,
         logs_dir=logs_dir,
         timeout=config.timeout_seconds,
-        reference_markdown=_agent_reference_markdown(config, assignment.agent_id),
+        system_prompt=_agent_system_prompt(config, assignment.agent_id),
+        reference_markdown=_agent_skill_markdown(config, assignment.agent_id),
         **_agent_run_kwargs(config, assignment.agent_id, assignment.codex_home),
     )
     return await _call_codex_with_resume_async(
@@ -1319,10 +1540,13 @@ def _run_planner_c_review(
 ) -> CodexResult:
     prompt = dedent(
         f"""
-        You are Planner Agent C in a local multi-agent development workflow.
+        {_agent_system_prompt(config, "planner_c")}
+
         Review the current plan only for implementation risk, parallel task
         boundaries, missing acceptance criteria, and likely integration issues.
         Do not rewrite the full plan.
+
+        {_agent_skill_reference_block(config, "planner_c")}
 
         User request:
         {config.user_request}
@@ -1358,10 +1582,13 @@ async def _run_planner_c_review_async(
 ) -> CodexResult:
     prompt = dedent(
         f"""
-        You are Planner Agent C in a local multi-agent development workflow.
+        {_agent_system_prompt(config, "planner_c")}
+
         Review the current plan only for implementation risk, parallel task
         boundaries, missing acceptance criteria, and likely integration issues.
         Do not rewrite the full plan.
+
+        {_agent_skill_reference_block(config, "planner_c")}
 
         User request:
         {config.user_request}
@@ -1442,6 +1669,55 @@ def _session_event_data(result: CodexResult) -> dict[str, str | None]:
     }
 
 
+def _snapshot_final_prompts_from_logs(store: StateStore) -> dict[str, str]:
+    logs_dir = store.run_dir / "logs"
+    if not logs_dir.exists():
+        return {}
+
+    state = store.load()
+    snapshots = state.setdefault("final_prompt_snapshots", {})
+    artifacts = state.setdefault("artifacts", {})
+    added: dict[str, str] = {}
+    prompt_dir = store.run_dir / "prompts" / "final"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+
+    for prompt_path in sorted(logs_dir.glob("*_prompt.txt")):
+        source_rel = store.to_relative(prompt_path)
+        if source_rel in snapshots:
+            continue
+        try:
+            prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        prompt_stem = prompt_path.stem
+        if prompt_stem.endswith("_prompt"):
+            prompt_stem = prompt_stem[: -len("_prompt")]
+        final_prompt_path = prompt_dir / f"{prompt_stem}_final_prompt.md"
+        final_prompt_path.write_text(prompt_text.rstrip() + "\n", encoding="utf-8")
+        final_rel = store.to_relative(final_prompt_path)
+        snapshots[source_rel] = {
+            "source_log": source_rel,
+            "path": final_rel,
+        }
+        artifacts[f"final_prompt_{_safe_artifact_key(prompt_stem)}"] = final_rel
+        added[source_rel] = final_rel
+
+    if added:
+        store.save(state)
+        store.append_event(
+            "final_prompts_saved",
+            "system",
+            "Final prompt snapshots saved",
+            {"count": len(added), "paths": list(added.values())},
+        )
+    return added
+
+
+def _safe_artifact_key(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")[:120] or "prompt"
+
+
 def _agent_run_kwargs(config: LocalRunConfig, agent_id: str, codex_home: str | None) -> dict[str, str | None]:
     return {
         "codex_home": _agent_codex_home(config, agent_id, codex_home),
@@ -1450,18 +1726,36 @@ def _agent_run_kwargs(config: LocalRunConfig, agent_id: str, codex_home: str | N
     }
 
 
-def _agent_reference_markdown(config: LocalRunConfig, agent_id: str) -> str | None:
+def _agent_prompt_config(config: LocalRunConfig, agent_id: str) -> dict[str, object]:
     prompt_config = config.prompt_overrides.get(agent_id)
     if not isinstance(prompt_config, dict):
         prompt_config = config.prompt_overrides.get(_agent_role_key(agent_id), {})
-    parts: list[str] = []
-    system_prompt = _config_str(prompt_config.get("system_prompt")) if isinstance(prompt_config, dict) else None
-    skill_markdown = _config_str(prompt_config.get("skill_markdown")) if isinstance(prompt_config, dict) else None
-    if system_prompt:
-        parts.append(f"System prompt override:\n{system_prompt}")
-    if skill_markdown:
-        parts.append(f"Skill / guideline:\n{skill_markdown}")
-    return "\n\n".join(parts) or None
+    return prompt_config if isinstance(prompt_config, dict) else {}
+
+
+def _agent_system_prompt(config: LocalRunConfig, agent_id: str) -> str:
+    prompt_config = _agent_prompt_config(config, agent_id)
+    return _config_str(prompt_config.get("system_prompt")) or load_agent_system_prompt(agent_id=agent_id)
+
+
+def _agent_skill_markdown(config: LocalRunConfig, agent_id: str) -> str | None:
+    prompt_config = _agent_prompt_config(config, agent_id)
+    return _config_str(prompt_config.get("skill_markdown"))
+
+
+def _agent_skill_reference_block(config: LocalRunConfig, agent_id: str) -> str:
+    skill_markdown = _agent_skill_markdown(config, agent_id)
+    if not skill_markdown:
+        return ""
+    return dedent(
+        f"""
+        Additional role reference guidance:
+        {skill_markdown}
+
+        Treat the role reference as advisory. The current task instructions,
+        file ownership rules, and safety constraints take precedence.
+        """
+    ).strip()
 
 
 def _agent_role_key(agent_id: str) -> str:
@@ -1506,6 +1800,463 @@ def _config_str(value: object) -> str | None:
     return text or None
 
 
+def make_agentic_qa_baseline_result(run_dir: Path, generated_app_dir: Path, *, attempt_index: int = 0) -> QAResult:
+    """Create a neutral QA baseline when deterministic mechanical QA is intentionally skipped."""
+
+    report_path = Path(run_dir) / "qa_report.md"
+    app_type = _guess_generated_app_type(generated_app_dir)
+    report = "\n".join(
+        [
+            "# Agentic QA",
+            "",
+            "Deterministic mechanical QA was skipped for this run.",
+            "The Codex QA Workspace Agent is responsible for selecting safe probes,",
+            "running local checks, collecting evidence, and writing the final verdict.",
+            "",
+            f"- Attempt: {attempt_index}",
+            f"- Generated app: `{generated_app_dir}`",
+            f"- Detected app type: `{app_type}`",
+            f"- Status before QA Agent verdict: PENDING",
+            "",
+        ]
+    )
+    report_path.write_text(report if report.endswith("\n") else f"{report}\n", encoding="utf-8")
+    return QAResult(
+        ok=True,
+        checked_files=[],
+        error_log="",
+        report_path=report_path,
+        report_markdown=report,
+        screenshots=[],
+        artifact_paths=[],
+        executable_status="SKIPPED",
+        executable_app_type=app_type,
+    )
+
+
+def _guess_generated_app_type(generated_app_dir: Path) -> str:
+    app_dir = Path(generated_app_dir)
+    manifest_path = app_dir / "codex_app_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+            app_type = str(manifest.get("app_type") or "").strip()
+            if app_type:
+                return app_type
+        except (OSError, json.JSONDecodeError):
+            pass
+    if (app_dir / "index.html").exists() or any(app_dir.glob("**/index.html")):
+        return "static_html"
+    package_json = app_dir / "package.json"
+    if package_json.exists():
+        return "web"
+    requirements = (app_dir / "requirements.txt").read_text(encoding="utf-8", errors="replace").lower() if (app_dir / "requirements.txt").exists() else ""
+    py_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace").lower()
+        for path in sorted(app_dir.glob("*.py"))[:5]
+    )
+    if "streamlit" in requirements or "import streamlit" in py_text:
+        return "streamlit"
+    if any(token in py_text for token in ["tkinter", "pyqt", "pyside", "kivy"]):
+        return "desktop_gui"
+    if list(app_dir.glob("*.py")):
+        return "python"
+    return "unknown"
+
+
+def _prepare_qa_workspace(
+    *,
+    run_dir: Path,
+    attempt_dir: Path,
+    generated_app_dir: Path,
+    agent_id: str,
+    user_request: str,
+    contract_bundle: str,
+    generated_app_listing: str,
+    mechanical_qa_report: str,
+) -> Path:
+    workspace_name = "qa_workspace" if agent_id == "qa_1" else f"qa_workspace_{agent_id}"
+    workspace_dir = attempt_dir / workspace_name
+    _reset_child_directory(run_dir, workspace_dir)
+
+    app_copy_dir = workspace_dir / "app"
+    evidence_dir = workspace_dir / "evidence"
+    screenshots_dir = workspace_dir / "screenshots"
+    scratch_dir = workspace_dir / "scratch"
+    context_dir = workspace_dir / "context"
+    for path in [evidence_dir, screenshots_dir, scratch_dir, context_dir]:
+        path.mkdir(parents=True, exist_ok=True)
+
+    shutil.copytree(
+        generated_app_dir,
+        app_copy_dir,
+        ignore=shutil.ignore_patterns(".git", ".venv", "node_modules", "__pycache__"),
+    )
+
+    _write_text(context_dir / "user_request.md", user_request)
+    _write_text(context_dir / "contract_bundle.md", contract_bundle or "(no contract bundle)")
+    _write_text(context_dir / "generated_app_listing.txt", generated_app_listing or "(no generated app listing)")
+    _write_text(context_dir / "qa_baseline_report.md", mechanical_qa_report or "(no QA baseline report)")
+    _write_text(context_dir / "mechanical_qa_report.md", mechanical_qa_report or "(no mechanical QA report)")
+    _copy_qa_tools(run_dir, workspace_dir)
+    _write_text(
+        workspace_dir / "README_QA_WORKSPACE.md",
+        "\n".join(
+            [
+                "# QA Workspace",
+                "",
+                "This directory is the QA Agent's isolated working area.",
+                "",
+                "- Inspect `app/` as the generated app under test.",
+                "- Use `qa_tools/` for safe evidence-producing probes instead of ad-hoc global automation.",
+                "- On Windows, prefer `qa_tools\\*.cmd` launchers so probes use Orchestra's Python environment.",
+                "- Write probes, notes, logs, and verdict files under `evidence/`.",
+                "- Write screenshots under `screenshots/`.",
+                "- Use `scratch/` for temporary experiments.",
+                "- Do not write outside this QA workspace.",
+                "",
+            ]
+        ),
+    )
+    _append_jsonl(
+        evidence_dir / "command_log.jsonl",
+        {
+            "event": "workspace_prepared",
+            "cwd": ".",
+            "purpose": "QA workspace initialized with generated app copy and context files.",
+            "exit_code": 0,
+        },
+    )
+    return workspace_dir
+
+
+def _copy_qa_tools(run_dir: Path, workspace_dir: Path) -> None:
+    project_root = Path(run_dir).parent.parent
+    tools_source = project_root / "qa_tools"
+    tools_target = Path(workspace_dir) / "qa_tools"
+    if tools_target.exists():
+        shutil.rmtree(tools_target)
+    if tools_source.exists():
+        shutil.copytree(
+            tools_source,
+            tools_target,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        _write_qa_tool_launchers(project_root, tools_target)
+        return
+    tools_target.mkdir(parents=True, exist_ok=True)
+    _write_text(
+        tools_target / "README.md",
+        "# QA Tools\n\nNo project qa_tools directory was found. Use safe local commands and record evidence manually.\n",
+    )
+
+
+def _write_qa_tool_launchers(project_root: Path, tools_target: Path) -> None:
+    python_path = _qa_tools_python_path(project_root)
+    for tool_name in ["command_probe", "file_probe", "browser_probe"]:
+        script_path = tools_target / f"{tool_name}.py"
+        if not script_path.exists():
+            continue
+        _write_text(
+            tools_target / f"{tool_name}.cmd",
+            "\n".join(
+                [
+                    "@echo off",
+                    "setlocal",
+                    "set PYTHONUTF8=1",
+                    "set PYTHONIOENCODING=utf-8",
+                    f'"{python_path}" "%~dp0{tool_name}.py" %*',
+                    "",
+                ]
+            ),
+        )
+
+
+def _qa_tools_python_path(project_root: Path) -> str:
+    candidates: list[Path] = []
+    env_python = os.environ.get("ORCHESTRA_PYTHON")
+    if env_python:
+        candidates.append(Path(env_python))
+    candidates.append(Path(project_root) / ".venv" / "Scripts" / "python.exe")
+    candidates.append(Path(sys.executable))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+def _reset_child_directory(root_dir: Path, target_dir: Path) -> None:
+    root = Path(root_dir).resolve()
+    target = Path(target_dir).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError(f"Refusing to clear directory outside run root: {target_dir}")
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n", encoding="utf-8", errors="replace")
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _write_workspace_fallback_verdict(workspace_dir: Path, *, status: str, summary: str) -> Path:
+    evidence_dir = workspace_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    findings_path = evidence_dir / "qa_findings.md"
+    verdict_path = evidence_dir / "verdict.json"
+    command_log_path = evidence_dir / "command_log.jsonl"
+    if not command_log_path.exists():
+        _append_jsonl(
+            command_log_path,
+            {
+                "event": "fallback_verdict",
+                "cwd": ".",
+                "purpose": "Fallback verdict generated by Orchestra because QA Agent evidence was incomplete.",
+                "exit_code": 0,
+            },
+        )
+    if not findings_path.exists():
+        _write_text(
+            findings_path,
+            "\n".join(
+                [
+                    "# QA Findings",
+                    "",
+                    summary,
+                    "",
+                    "No autonomous QA evidence was produced beyond the fallback verdict.",
+                    "",
+                ]
+            ),
+        )
+    verdict = {
+        "status": status,
+        "summary": summary,
+        "findings": [summary],
+        "evidence": ["evidence/qa_findings.md", "evidence/command_log.jsonl"],
+        "affected_paths": ["unknown"],
+        "suspected_owners": ["unknown"],
+    }
+    verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return verdict_path
+
+
+def _load_or_create_workspace_verdict(workspace_dir: Path) -> tuple[dict[str, Any], Path, str | None]:
+    verdict_path = workspace_dir / "evidence" / "verdict.json"
+    if not verdict_path.exists():
+        _write_workspace_fallback_verdict(
+            workspace_dir,
+            status="FAIL",
+            summary="QA workspace agent did not create evidence/verdict.json.",
+        )
+        return json.loads(verdict_path.read_text(encoding="utf-8")), verdict_path, "missing verdict.json"
+    try:
+        payload = json.loads(verdict_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        _write_workspace_fallback_verdict(
+            workspace_dir,
+            status="FAIL",
+            summary=f"QA workspace agent wrote invalid evidence/verdict.json: {exc}",
+        )
+        return json.loads(verdict_path.read_text(encoding="utf-8")), verdict_path, f"invalid verdict.json: {exc}"
+    if not isinstance(payload, dict):
+        _write_workspace_fallback_verdict(
+            workspace_dir,
+            status="FAIL",
+            summary="QA workspace agent wrote a non-object evidence/verdict.json.",
+        )
+        return json.loads(verdict_path.read_text(encoding="utf-8")), verdict_path, "verdict.json root is not an object"
+    if _workspace_verdict_status(payload) == "UNKNOWN":
+        payload["status"] = "FAIL"
+        payload.setdefault("summary", "QA workspace verdict status was missing or invalid.")
+        findings = payload.get("findings")
+        if not isinstance(findings, list):
+            findings = []
+        findings.append("verdict.json status must be PASS, FAIL, INCONCLUSIVE, or UNSUPPORTED.")
+        payload["findings"] = findings
+        verdict_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return payload, verdict_path, "invalid verdict status"
+    return payload, verdict_path, None
+
+
+def _workspace_verdict_status(verdict: dict[str, Any]) -> str:
+    status = str(verdict.get("status") or "").strip().upper()
+    if status in {"PASS", "FAIL", "INCONCLUSIVE", "UNSUPPORTED"}:
+        return status
+    return "UNKNOWN"
+
+
+def _workspace_verdict_list(verdict: dict[str, Any], key: str) -> list[str]:
+    raw = verdict.get(key)
+    if isinstance(raw, str):
+        raw_values: list[object] = [raw]
+    elif isinstance(raw, list):
+        raw_values = raw
+    else:
+        raw_values = []
+    values: list[str] = []
+    for value in raw_values:
+        text = str(value).strip().strip("`")
+        if not text or text.lower() in {"none", "n/a", "null"}:
+            continue
+        values.append(text)
+    return values
+
+
+def _collect_qa_workspace_screenshots(workspace_dir: Path) -> list[Path]:
+    patterns = ["*.png", "*.jpg", "*.jpeg", "*.webp"]
+    screenshots: list[Path] = []
+    for root in [workspace_dir / "screenshots", workspace_dir / "evidence"]:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            screenshots.extend(path for path in root.rglob(pattern) if path.is_file())
+    return _unique_paths(screenshots)
+
+
+def _collect_qa_workspace_artifacts(workspace_dir: Path) -> list[Path]:
+    roots = [workspace_dir / "evidence", workspace_dir / "screenshots"]
+    paths: list[Path] = []
+    for root in roots:
+        if root.exists():
+            paths.extend(path for path in root.rglob("*") if path.is_file())
+    return _unique_paths(paths)
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def _workspace_hard_policy_errors(
+    *,
+    verdict: dict[str, Any],
+    workspace_dir: Path,
+    mechanical_result: QAResult,
+    screenshots: list[Path],
+) -> list[str]:
+    if _workspace_verdict_status(verdict) != "PASS":
+        return []
+    errors: list[str] = []
+    findings_path = workspace_dir / "evidence" / "qa_findings.md"
+    command_log_path = workspace_dir / "evidence" / "command_log.jsonl"
+    if not findings_path.exists():
+        errors.append("PASS is not allowed without evidence/qa_findings.md.")
+    if not command_log_path.exists() or command_log_path.stat().st_size == 0:
+        errors.append("PASS is not allowed without evidence/command_log.jsonl.")
+    elif not _command_log_has_qa_probe(command_log_path):
+        errors.append("PASS is not allowed without at least one intentional QA probe in command_log.jsonl.")
+    if _is_visual_qa_app(mechanical_result.executable_app_type) and not screenshots:
+        errors.append("PASS is not allowed for a visual/browser app without screenshot evidence.")
+    return errors
+
+
+def _command_log_has_qa_probe(command_log_path: Path) -> bool:
+    try:
+        lines = command_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    ignored_events = {"workspace_prepared", "fallback_verdict"}
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return True
+        event = str(payload.get("event") or "").strip()
+        tool = str(payload.get("tool") or "").strip()
+        command = payload.get("command")
+        if tool or command or event not in ignored_events:
+            return True
+    return False
+
+
+def _is_visual_qa_app(app_type: str | None) -> bool:
+    text = (app_type or "").lower()
+    return any(token in text for token in ["browser", "html", "web", "static", "streamlit", "frontend", "game"])
+
+
+def _downgrade_workspace_verdict(verdict_path: Path, verdict: dict[str, Any], hard_policy_errors: list[str]) -> None:
+    verdict["status"] = "FAIL"
+    previous_summary = str(verdict.get("summary") or "").strip()
+    verdict["summary"] = (
+        "Hard QA policy downgraded this verdict from PASS to FAIL because required evidence was missing."
+        + (f" Previous summary: {previous_summary}" if previous_summary else "")
+    )
+    findings = verdict.get("findings")
+    if not isinstance(findings, list):
+        findings = []
+    findings.extend(hard_policy_errors)
+    verdict["findings"] = findings
+    evidence = verdict.get("evidence")
+    if not isinstance(evidence, list):
+        evidence = []
+    evidence.append("Hard policy checks in Orchestra QA stage")
+    verdict["evidence"] = evidence
+    verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _workspace_review_section(
+    *,
+    agent_id: str,
+    workspace_dir: Path,
+    verdict: dict[str, Any],
+    verdict_path: Path,
+    verdict_error: str | None,
+    hard_policy_errors: list[str],
+    agent_output: str,
+    agent_error: str,
+) -> str:
+    hard_policy_text = "\n".join(f"- {error}" for error in hard_policy_errors) or "- None"
+    output = _truncate_text(agent_output or agent_error or "(no agent output)", max_chars=6000)
+    return "\n".join(
+        [
+            f"### {agent_id} Workspace QA",
+            "",
+            f"- Workspace: `{workspace_dir}`",
+            f"- Verdict path: `{verdict_path}`",
+            f"- Verdict status: {_workspace_verdict_status(verdict)}",
+            f"- Verdict parse error: {verdict_error or 'None'}",
+            "- Hard policy errors:",
+            hard_policy_text,
+            "",
+            "#### Verdict JSON",
+            "",
+            "```json",
+            json.dumps(verdict, ensure_ascii=False, indent=2),
+            "```",
+            "",
+            "#### Agent Output",
+            "",
+            "```text",
+            output,
+            "```",
+            "",
+        ]
+    )
+
+
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 20)].rstrip() + "\n... truncated"
+
+
 def _record_qa_artifacts(store: StateStore, qa_result: QAResult) -> None:
     store.record_artifact("qa_report", qa_result.report_path)
     for index, screenshot_path in enumerate(qa_result.screenshots, start=1):
@@ -1524,6 +2275,28 @@ def _parse_qa_status(output: str) -> str:
             if value.startswith("FAIL"):
                 return "FAIL"
     return "UNKNOWN"
+
+
+def _extract_json_object(output: str) -> tuple[dict[str, Any] | None, str | None]:
+    text = output.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    first = text.find("{")
+    last = text.rfind("}")
+    if first < 0 or last <= first:
+        return None, "No JSON object found in QA scenario plan output."
+    candidate = text[first : last + 1]
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return None, f"Invalid JSON in QA scenario plan output: {exc}"
+    if not isinstance(payload, dict):
+        return None, "QA scenario plan root must be a JSON object."
+    scenarios = payload.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        return None, "QA scenario plan must contain a non-empty scenarios array."
+    return payload, None
 
 
 def _extract_affected_paths(output: str) -> list[str]:

@@ -7,6 +7,7 @@ from textwrap import dedent
 from typing import Callable
 
 from codex_runner import CodexProcessHandle, CodexResult, run_codex, run_codex_result, run_codex_result_async
+from prompt_templates import load_agent_system_prompt
 
 
 def _reference_block(reference_markdown: str | None) -> str:
@@ -31,6 +32,12 @@ MANIFEST_CONTRACT_NOTE = (
 )
 
 
+def _system_prompt(agent_id: str, override: str | None = None) -> str:
+    if override and override.strip():
+        return override.strip()
+    return load_agent_system_prompt(agent_id=agent_id)
+
+
 class PlannerAgent:
     """Backward-compatible single planner used by the CLI MVP."""
 
@@ -42,6 +49,7 @@ class PlannerAgent:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
@@ -49,6 +57,7 @@ class PlannerAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def create_plan(self, user_request: str, workdir: Path) -> str:
@@ -58,6 +67,7 @@ class PlannerAgent:
             timeout=self.timeout,
             model=self.model,
             reasoning_effort=self.reasoning_effort,
+            system_prompt=self.system_prompt,
             reference_markdown=self.reference_markdown,
         ).create_initial_plan(user_request, workdir).stdout
 
@@ -73,6 +83,7 @@ class PlannerAgentA:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
@@ -80,6 +91,7 @@ class PlannerAgentA:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def create_initial_plan(
@@ -155,9 +167,9 @@ class PlannerAgentA:
     def _initial_plan_prompt(self, user_request: str) -> str:
         return dedent(
             f"""
-            You are Planner Agent A in a Codex CLI multi-agent development workflow.
-            Produce the initial planning document now. Do not ask follow-up questions.
-            Do not reply with acknowledgements.
+            {_system_prompt("planner_a", self.system_prompt)}
+
+            Produce the initial planning document now.
 
             {_reference_block(self.reference_markdown)}
 
@@ -200,7 +212,8 @@ class PlannerAgentA:
         feedback_block = user_feedback or "(no additional user feedback)"
         return dedent(
             f"""
-            Continue as Planner Agent A.
+            {_system_prompt("planner_a", self.system_prompt)}
+
             Revise the plan into the current final planning document.
             Use your existing session context if available.
 
@@ -286,6 +299,7 @@ class PlannerAgentB:
         timeout: int = 600,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
@@ -293,6 +307,7 @@ class PlannerAgentB:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def review_plan(
@@ -353,9 +368,7 @@ class PlannerAgentB:
         feedback_block = user_feedback or "(no additional user feedback)"
         return dedent(
             f"""
-            You are Planner Agent B in a Codex CLI multi-agent development workflow.
-            Review Planner Agent A's plan against the user's request.
-            Do not rewrite the full plan. Provide focused review comments.
+            {_system_prompt("planner_b", self.system_prompt)}
 
             {_reference_block(self.reference_markdown)}
 
@@ -398,12 +411,16 @@ class ArchitectAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
+        self.reference_markdown = reference_markdown
 
     def create_contract_bundle_result(
         self,
@@ -466,8 +483,9 @@ class ArchitectAgent:
     ) -> str:
         return dedent(
             f"""
-            You are Architect Agent in a Codex CLI multi-agent development workflow.
-            Create a contract bundle for parallel code agents. Do not ask follow-up questions.
+            {_system_prompt("architect", self.system_prompt)}
+
+            {_reference_block(self.reference_markdown)}
 
             Work only in the current working directory. The current working directory is
             the contract directory. Create or overwrite only these files:
@@ -539,12 +557,16 @@ class ScaffoldAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
+        reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
         self.logs_dir = logs_dir
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
+        self.reference_markdown = reference_markdown
 
     def create_scaffold_result(
         self,
@@ -597,9 +619,9 @@ class ScaffoldAgent:
     def _scaffold_prompt(self, user_request: str, contract_bundle: str) -> str:
         return dedent(
             f"""
-            You are Scaffold Agent in a Codex CLI multi-agent development workflow.
-            Create only the shared project skeleton for later parallel code agents.
-            Do not ask follow-up questions.
+            {_system_prompt("scaffold", self.system_prompt)}
+
+            {_reference_block(self.reference_markdown)}
 
             Work only in the current working directory. The current working directory is
             scaffold_app. Do not modify files outside it.
@@ -636,6 +658,7 @@ class CodeAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.agent_id = agent_id
@@ -644,6 +667,7 @@ class CodeAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def implement_tasks_result(
@@ -699,8 +723,9 @@ class CodeAgent:
     def _implement_prompt(self, user_request: str, contract_bundle: str, assigned_tasks_json: str) -> str:
         return dedent(
             f"""
-            You are {self.agent_id}, a Code Agent in a parallel Codex development workflow.
-            Implement only your assigned tasks. Do not ask follow-up questions.
+            {_system_prompt(self.agent_id, self.system_prompt)}
+
+            Agent id: {self.agent_id}
 
             {_reference_block(self.reference_markdown)}
 
@@ -805,7 +830,10 @@ class CodeAgent:
     ) -> str:
         return dedent(
             f"""
-            Continue as {self.agent_id}, a Code Agent in a parallel Codex development workflow.
+            {_system_prompt(self.agent_id, self.system_prompt)}
+
+            Agent id: {self.agent_id}
+            Continue this code-agent session.
             The integrated app failed QA or the user requested fixes. Resume your own work,
             inspect the feedback, and update only the files owned or allowed by your assignment.
 
@@ -860,6 +888,7 @@ class IntegratorAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.codex_home = codex_home
@@ -867,6 +896,7 @@ class IntegratorAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def integrate_result(
@@ -930,9 +960,7 @@ class IntegratorAgent:
     ) -> str:
         return dedent(
             f"""
-            You are Integrator Agent in a parallel Codex development workflow.
-            Merge the code-agent outputs into integration/merged_app.
-            Do not ask follow-up questions.
+            {_system_prompt("integrator", self.system_prompt)}
 
             {_reference_block(self.reference_markdown)}
 
@@ -1049,7 +1077,9 @@ class IntegratorAgent:
     ) -> str:
         return dedent(
             f"""
-            Continue as Integrator Agent in a parallel Codex development workflow.
+            {_system_prompt("integrator", self.system_prompt)}
+
+            Continue this integrator session.
             The integrated app failed QA or the user requested fixes.
 
             {_reference_block(self.reference_markdown)}
@@ -1102,6 +1132,7 @@ class QAAgent:
         timeout: int = 900,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
         reference_markdown: str | None = None,
     ) -> None:
         self.agent_id = agent_id
@@ -1110,6 +1141,7 @@ class QAAgent:
         self.timeout = timeout
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.system_prompt = system_prompt
         self.reference_markdown = reference_markdown
 
     def review_result(
@@ -1166,6 +1198,244 @@ class QAAgent:
             process_started=process_started,
         )
 
+    async def plan_scenarios_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        run_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+    ) -> CodexResult:
+        prompt = self._scenario_plan_prompt(user_request, contract_bundle, generated_app_listing)
+        return await run_codex_result_async(
+            prompt,
+            workdir=run_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_scenario_plan",
+            session_id=session_id,
+            sandbox="read-only",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            process_started=process_started,
+        )
+
+    async def run_workspace_qa_async(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        mechanical_qa_report: str,
+        qa_workspace_dir: Path,
+        *,
+        session_id: str | None = None,
+        process_started: Callable[[CodexProcessHandle], None] | None = None,
+        image_paths: list[Path] | None = None,
+    ) -> CodexResult:
+        prompt = self._workspace_qa_prompt(
+            user_request,
+            contract_bundle,
+            generated_app_listing,
+            mechanical_qa_report,
+        )
+        return await run_codex_result_async(
+            prompt,
+            workdir=qa_workspace_dir,
+            codex_home=self.codex_home,
+            timeout=self.timeout,
+            logs_dir=self.logs_dir,
+            label=f"{self.agent_id}_workspace_qa",
+            session_id=session_id,
+            sandbox="workspace-write",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            image_paths=image_paths or [],
+            require_writable=True,
+            process_started=process_started,
+        )
+
+    def _scenario_plan_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+    ) -> str:
+        return dedent(
+            f"""
+            {_system_prompt(self.agent_id, self.system_prompt)}
+
+            Agent id: {self.agent_id}
+
+            {_reference_block(self.reference_markdown)}
+
+            You are starting the QA phase. First, create a deterministic browser
+            QA scenario plan for the mechanical QA runner. Do not make a final
+            PASS/FAIL judgment yet.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Generated app listing:
+            {generated_app_listing}
+
+            Read relevant generated app files when useful. On Windows, always
+            read text as UTF-8, for example with Python `Path(...).read_text(encoding="utf-8")`
+            or PowerShell `Get-Content -Encoding UTF8`.
+
+            Output only valid JSON. Do not wrap it in Markdown fences.
+
+            Schema:
+            {{
+              "version": 1,
+              "summary": "short explanation of what this plan checks",
+              "scenarios": [
+                {{
+                  "name": "short scenario name",
+                  "intent": "why this scenario matters",
+                  "stop_on_failure": true,
+                  "steps": [
+                    {{"action": "goto", "url": "/index.html"}},
+                    {{"action": "expect_text", "text": "visible text"}},
+                    {{"action": "expect_visible", "selector": "css selector"}},
+                    {{"action": "click", "selector": "css selector"}},
+                    {{"action": "press", "key": "ArrowRight"}},
+                    {{"action": "type", "selector": "css selector", "text": "input text"}},
+                    {{"action": "drag", "selector": "css selector", "dx": -300, "dy": 0}},
+                    {{"action": "wait", "ms": 500}},
+                    {{"action": "screenshot", "name": "after_interaction"}}
+                  ]
+                }}
+              ]
+            }}
+
+            Allowed actions:
+            - goto: local path or local URL only.
+            - expect_text: checks body text contains the given text.
+            - expect_visible: CSS selector must become visible.
+            - click: click first matching CSS selector.
+            - press: browser keyboard key, optionally with selector.
+            - type: fill text into selector.
+            - drag: drag selector center by dx/dy pixels.
+            - wait: bounded wait in milliseconds.
+            - screenshot: capture evidence.
+
+            Planning rules:
+            - Choose scenarios that match the user's actual app type. Do not use
+              game keyboard controls for ordinary web pages unless the app needs them.
+            - Prefer stable selectors such as data-testid, aria-label, ids, or
+              clear semantic elements visible in the generated files.
+            - Keep it small: 1-3 scenarios and 3-8 steps each.
+            - Include at least one screenshot step.
+            - Do not invent login credentials, secrets, network services, or
+              external dependencies.
+            - If the app cannot be meaningfully interacted with, produce a load
+              and visibility scenario instead of random input.
+            """
+        ).strip()
+
+    def _workspace_qa_prompt(
+        self,
+        user_request: str,
+        contract_bundle: str,
+        generated_app_listing: str,
+        mechanical_qa_report: str,
+    ) -> str:
+        return dedent(
+            f"""
+            {_system_prompt(self.agent_id, self.system_prompt)}
+
+            Agent id: {self.agent_id}
+
+            {_reference_block(self.reference_markdown)}
+
+            You are now running autonomous QA inside a dedicated QA workspace.
+            The current working directory is the only workspace you may write to.
+            Write user-facing summaries, findings, and timeline-visible explanations in Korean.
+            Keep machine-readable keys, file paths, commands, and QA_STATUS values in English.
+
+            Workspace layout:
+            - app/: copy of the completed generated app. Treat it as the subject under test.
+            - context/: request, contract, generated app listing, and QA baseline/mechanical report.
+            - qa_tools/: safe evidence-producing tools for local commands, file checks, and local browser screenshots.
+            - evidence/: write command logs, findings, helper scripts, and verdict.json here.
+            - screenshots/: write visual evidence here for browser, game, dashboard, or other visual apps.
+            - scratch/: optional temporary experiments. Do not modify files outside this workspace.
+
+            User request:
+            {user_request}
+
+            Contract bundle:
+            {contract_bundle}
+
+            Generated app listing:
+            {generated_app_listing}
+
+            QA baseline/mechanical report:
+            {mechanical_qa_report}
+
+            Duties:
+            - Inspect the app and decide what evidence is needed to judge the user's request.
+            - Run safe local commands only from this workspace.
+            - Prefer `qa_tools/command_probe.py`, `qa_tools/file_probe.py`, and `qa_tools/browser_probe.py`
+              because they write evidence and command logs consistently.
+            - On Windows, prefer the generated `.cmd` launchers such as `qa_tools\\browser_probe.cmd`
+              because they use Orchestra's Python environment with installed QA dependencies.
+            - You may create small QA scripts, smoke tests, or CLI probes in evidence/ or scratch/ when the provided tools are insufficient.
+            - Do not use external network services or secrets.
+            - Prefer commands that only read app files, build locally, run local tests, or launch local app servers.
+            - If this is a visual/browser app, capture at least one screenshot into screenshots/.
+            - For browser games or canvas apps, use `qa_tools\\browser_probe.cmd --action-file ...`
+              with page-scoped actions such as screenshot, wait, click, press, and drag.
+              Drag coordinates are relative to the selected element and are allowed because
+              they operate only inside the generated app page.
+            - Do not use global screenshots, pyautogui, OS-wide mouse/keyboard automation, Alt+Tab, Win-key shortcuts, or desktop window control.
+            - For desktop GUI apps, do not launch the interactive GUI unless there is a bounded self-test, smoke-test, or unit-test mode.
+              Test importable logic, CLI flags, or unit tests instead.
+            - If an action fails because the test method is wrong, adapt and retry before judging the app.
+            - If evidence is missing, do not mark PASS.
+            - If a baseline/mechanical report is FAIL, treat it as blocking unless your own evidence clearly proves it was a harness error.
+            - If text appears corrupted on Windows, re-read files as UTF-8 before using encoding corruption as evidence.
+            - Do not edit the final app in app/. If you need to experiment with a fix, copy files to scratch/ and describe it.
+
+            Required files to create before finishing:
+            1. evidence/command_log.jsonl
+               - JSON lines, one per command/probe you intentionally ran.
+               - Include command, cwd, purpose, exit_code when known, and related evidence paths.
+            2. evidence/qa_findings.md
+               - Human-readable summary of what you tested, what evidence you collected, and findings.
+            3. evidence/verdict.json
+               - Strict JSON object with this schema:
+                 {{
+                   "status": "PASS" | "FAIL" | "INCONCLUSIVE" | "UNSUPPORTED",
+                   "summary": "one paragraph",
+                   "findings": ["concrete issue or none"],
+                   "evidence": ["relative evidence path or observation"],
+                   "affected_paths": ["app-relative path or none"],
+                   "suspected_owners": ["code_1", "code_2", "integrator", "unknown", "none"]
+                 }}
+
+            Verdict rules:
+            - PASS only when the app has runnable evidence for the core requested behavior.
+            - FAIL when the app runs but violates a requirement or has blocking runtime/build/visual defects.
+            - INCONCLUSIVE when the app type is partly testable but evidence is insufficient.
+            - UNSUPPORTED when the app cannot be safely executed by local QA tooling.
+            - For browser/game/dashboard apps, PASS requires screenshot evidence.
+            - For desktop GUI apps, PASS requires a self-test/unit-test/import evidence path because GUI input automation is disabled by default.
+
+            Final response:
+            - Print a concise summary.
+            - Include a first line `QA_STATUS: PASS`, `QA_STATUS: FAIL`,
+              `QA_STATUS: INCONCLUSIVE`, or `QA_STATUS: UNSUPPORTED`.
+            - Reference evidence/verdict.json and evidence/qa_findings.md.
+            """
+        ).strip()
+
     def _review_prompt(
         self,
         user_request: str,
@@ -1177,11 +1447,9 @@ class QAAgent:
         screenshot_list = "\n".join(f"- {path}" for path in screenshot_paths) or "- None"
         return dedent(
             f"""
-            You are {self.agent_id}, a QA Agent in a Codex CLI multi-agent development workflow.
-            Review the completed app using the approved contract, generated app listing,
-            mechanical QA report, and attached screenshots when present.
+            {_system_prompt(self.agent_id, self.system_prompt)}
 
-            Do not modify files. Do not ask follow-up questions.
+            Agent id: {self.agent_id}
 
             {_reference_block(self.reference_markdown)}
 
@@ -1204,10 +1472,14 @@ class QAAgent:
             - Compare the implementation evidence against the acceptance criteria.
             - Inspect attached screenshots for obvious visual breakage, blank pages,
               broken layout, or missing primary UI.
+            - Use the scenario plan you created earlier in this same session as
+              context for interpreting the mechanical QA results.
+            - If file text appears mojibake-corrupted on Windows, re-read it as
+              UTF-8 before using encoding corruption as failure evidence.
             - Treat mechanical QA FAIL as a blocking issue.
             - Treat mechanical QA SKIP as a risk, not automatically a failure.
-            - For browser/game apps, verify whether the evidence supports keyboard
-              handling and visible gameplay enough for this run.
+            - For browser/game apps, verify whether the executed scenarios and
+              screenshots support the intended interaction enough for this run.
             - Avoid inventing requirements outside the approved contract.
 
             Output format:

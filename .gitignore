@@ -24,6 +24,23 @@ local_prompt_overrides.json
 reference_packs/gstack_src/
 reference_packs/karpathy_src/
 
+# Local third-party skill source drops. Keep only curated prompt-injection
+# guideline files that the skill registry actually reads.
+external_skills/gstack-main/
+external_skills/andrej-karpathy-skills-main/**
+!external_skills/andrej-karpathy-skills-main/
+!external_skills/andrej-karpathy-skills-main/andrej-karpathy-skills-main/
+!external_skills/andrej-karpathy-skills-main/andrej-karpathy-skills-main/skills/
+!external_skills/andrej-karpathy-skills-main/andrej-karpathy-skills-main/skills/karpathy-guidelines/
+!external_skills/andrej-karpathy-skills-main/andrej-karpathy-skills-main/skills/karpathy-guidelines/SKILL.md
+external_skills/agent-rules-books-main/**
+!external_skills/agent-rules-books-main/
+!external_skills/agent-rules-books-main/LICENSE
+!external_skills/agent-rules-books-main/README.md
+!external_skills/agent-rules-books-main/*/
+!external_skills/agent-rules-books-main/*/*.mini.md
+!external_skills/agent-rules-books-main/*/*.nano.md
+
 # Frontend and desktop build artifacts
 ux/node_modules/
 ux/dist/

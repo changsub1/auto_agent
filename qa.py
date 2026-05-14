@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -56,6 +57,9 @@ def run_python_syntax_check(
                 cwd=str(app_dir),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=_utf8_child_env(),
                 timeout=timeout,
                 shell=False,
             )
@@ -204,3 +208,11 @@ def _safe_process_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _utf8_child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("LANG", "C.UTF-8")
+    return env

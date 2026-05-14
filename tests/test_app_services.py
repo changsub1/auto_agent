@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from agents import CodeAgent, QAAgent
 from app_services import (
     AgentProviderConfig,
     AgentPromptOverride,
@@ -29,8 +30,11 @@ from app_services import (
     WorkflowGraph,
     LOCAL_ENV_KEYS,
 )
+from local_dashboard_runner import _snapshot_final_prompts_from_logs
 from run_worker import RunWorker
 from qa import QAResult
+from prompt_templates import available_template_roles, load_agent_system_prompt, role_for_agent_id
+from skill_registry import DEFAULT_CODE_AGENT_SKILL_ID, SkillRegistry
 from state_store import StateStore
 from workflow_engine import WorkflowEngine
 
@@ -53,6 +57,46 @@ class AppServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def _write_skill_registry_fixture(self) -> None:
+        karpathy = (
+            self.project_root
+            / "external_skills"
+            / "andrej-karpathy-skills-main"
+            / "andrej-karpathy-skills-main"
+            / "skills"
+            / "karpathy-guidelines"
+            / "SKILL.md"
+        )
+        karpathy.parent.mkdir(parents=True, exist_ok=True)
+        karpathy.write_text(
+            "---\n"
+            "name: karpathy-guidelines\n"
+            "description: Behavioral coding guidelines.\n"
+            "license: MIT\n"
+            "---\n\n"
+            "# Karpathy Guidelines\n\nKeep changes simple and verifiable.\n",
+            encoding="utf-8",
+        )
+        rules_root = self.project_root / "external_skills" / "agent-rules-books-main"
+        clean_code = rules_root / "clean-code" / "clean-code.mini.md"
+        clean_code.parent.mkdir(parents=True, exist_ok=True)
+        clean_code.write_text(
+            "# OBEY Clean Code\n\n"
+            "## When to use\n\n"
+            "Use when readability matters.\n\n"
+            "## Decision rules\n\n"
+            "- Prefer clear names.\n",
+            encoding="utf-8",
+        )
+        refactoring = rules_root / "refactoring" / "refactoring.mini.md"
+        refactoring.parent.mkdir(parents=True, exist_ok=True)
+        refactoring.write_text(
+            "# OBEY Refactoring\n\n"
+            "## When to use\n\n"
+            "Use when changing existing code.\n",
+            encoding="utf-8",
+        )
 
     def test_run_create_request_validates_routing_mode(self) -> None:
         with self.assertRaises(ValidationError):
@@ -117,8 +161,9 @@ class AppServiceTests(unittest.TestCase):
         prompt = service.get_prompt("qa_1")
 
         self.assertEqual(prompt.preset, "default_qa")
+        self.assertIn("QA Agent", prompt.system_prompt)
         self.assertIn("mechanical QA", prompt.skill_markdown)
-        self.assertIn("System prompt override", prompt.effective_prompt_preview)
+        self.assertIn("System Prompt", prompt.effective_prompt_preview)
 
         saved = service.save_prompt(
             AgentPromptOverride(
@@ -150,6 +195,103 @@ class AppServiceTests(unittest.TestCase):
         self.assertIn("qa_1", detail.state["prompt_snapshots"])
         self.assertTrue((created_dir / "prompts" / "qa_1_skill.md").exists())
         self.assertEqual(detail.state["dashboard_config"]["prompt_overrides"]["qa_1"]["skill_markdown"], "Strict QA rubric")
+        self.assertEqual(detail.state["routing"]["pipeline"][-1], "qa_agent")
+        qa_stage = next(stage for stage in detail.state["workflow"]["stages"] if stage["id"] == "qa")
+        self.assertEqual(qa_stage["agents"], ["qa_1"])
+
+    def test_skill_registry_exposes_karpathy_and_rules_books(self) -> None:
+        self._write_skill_registry_fixture()
+        registry = SkillRegistry(self.project_root)
+        skills = registry.list_skills()
+
+        self.assertTrue(any(skill.id == DEFAULT_CODE_AGENT_SKILL_ID for skill in skills))
+        self.assertTrue(any(skill.id == "rules-books/clean-code/mini" for skill in skills))
+        self.assertIn("Karpathy Guidelines", registry.load_skill_markdown(DEFAULT_CODE_AGENT_SKILL_ID))
+
+    def test_code_agent_defaults_to_karpathy_skill(self) -> None:
+        self._write_skill_registry_fixture()
+        prompt = PromptService(self.project_root).get_prompt("code_1")
+
+        self.assertEqual(prompt.skill_id, DEFAULT_CODE_AGENT_SKILL_ID)
+        self.assertIn("Karpathy Guidelines", prompt.skill_markdown)
+        self.assertIn("Source: forrestchang/andrej-karpathy-skills", prompt.skill_markdown)
+
+    def test_prompt_catalog_includes_skill_registry_entries(self) -> None:
+        self._write_skill_registry_fixture()
+        catalog = PromptService(self.project_root).catalog()
+        skill_ids = {skill.id for skill in catalog.skills}
+
+        self.assertIn(DEFAULT_CODE_AGENT_SKILL_ID, skill_ids)
+        self.assertIn("rules-books/refactoring/mini", skill_ids)
+        self.assertTrue(next(skill for skill in catalog.skills if skill.id == DEFAULT_CODE_AGENT_SKILL_ID).markdown)
+
+    def test_snapshot_final_prompts_from_codex_logs(self) -> None:
+        logs_dir = self.run_dir / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        prompt_log = logs_dir / "20260512_010203_123456_planner_a_draft_prompt.txt"
+        prompt_log.write_text("FINAL PROMPT BODY\n", encoding="utf-8")
+
+        added = _snapshot_final_prompts_from_logs(self.store)
+
+        expected_path = "prompts/final/20260512_010203_123456_planner_a_draft_final_prompt.md"
+        self.assertEqual(added, {"logs/20260512_010203_123456_planner_a_draft_prompt.txt": expected_path})
+        self.assertEqual((self.run_dir / expected_path).read_text(encoding="utf-8"), "FINAL PROMPT BODY\n")
+        state = self.store.load()
+        self.assertEqual(
+            state["final_prompt_snapshots"]["logs/20260512_010203_123456_planner_a_draft_prompt.txt"]["path"],
+            expected_path,
+        )
+        self.assertEqual(
+            state["artifacts"]["final_prompt_20260512_010203_123456_planner_a_draft"],
+            expected_path,
+        )
+        self.assertEqual(_snapshot_final_prompts_from_logs(self.store), {})
+
+    def test_agent_prompt_templates_load_for_default_roles(self) -> None:
+        roles = set(available_template_roles(self.project_root))
+        for role in [
+            "planner",
+            "reviewer",
+            "risk_reviewer",
+            "architect",
+            "scaffold",
+            "code_agent",
+            "integrator",
+            "qa_agent",
+        ]:
+            self.assertIn(role, roles)
+            self.assertTrue(load_agent_system_prompt(self.project_root, role=role).strip())
+
+    def test_agent_prompt_template_agent_id_mapping(self) -> None:
+        self.assertEqual(role_for_agent_id("code_2"), "code_agent")
+        self.assertEqual(role_for_agent_id("qa_2"), "qa_agent")
+        self.assertEqual(role_for_agent_id("planner_a"), "planner")
+        self.assertIn("Code Agent", load_agent_system_prompt(self.project_root, agent_id="code_2"))
+        self.assertIn("QA Agent", load_agent_system_prompt(self.project_root, agent_id="qa_2"))
+
+    def test_runtime_agents_use_system_prompt_override_separately_from_skill(self) -> None:
+        qa_agent = QAAgent(
+            agent_id="qa_1",
+            system_prompt="CUSTOM QA ROLE TEMPLATE",
+            reference_markdown="QA skill rubric",
+        )
+        qa_prompt = qa_agent._review_prompt("Build app", "Contract", "Files", "Mechanical report", [])
+
+        self.assertTrue(qa_prompt.startswith("CUSTOM QA ROLE TEMPLATE"))
+        self.assertIn("Additional role reference guidance", qa_prompt)
+        self.assertIn("QA skill rubric", qa_prompt)
+        self.assertNotIn("System prompt override", qa_prompt)
+
+        code_agent = CodeAgent(
+            agent_id="code_1",
+            system_prompt="CUSTOM CODE ROLE TEMPLATE",
+            reference_markdown="Code skill note",
+        )
+        code_prompt = code_agent._implement_prompt("Build app", "Contract", "{}")
+
+        self.assertTrue(code_prompt.startswith("CUSTOM CODE ROLE TEMPLATE"))
+        self.assertIn("Code skill note", code_prompt)
+        self.assertNotIn("System prompt override", code_prompt)
 
     def test_settings_service_round_trips_agent_configs(self) -> None:
         service = SettingsService(self.project_root)
@@ -279,6 +421,36 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(events[-1].who, "Planner A")
         self.assertEqual(events[-1].summary, "# Plan")
         self.assertEqual(events[-1].artifacts[0].path, "planning/03_final_plan.md")
+
+    def test_event_service_exposes_qa_evidence_artifacts(self) -> None:
+        qa_dir = self.run_dir / "qa" / "attempt_00"
+        qa_dir.mkdir(parents=True)
+        (qa_dir / "qa_scenarios.json").write_text('{"scenarios": []}\n', encoding="utf-8")
+        (qa_dir / "scenario_results.json").write_text('{"status": "PASS"}\n', encoding="utf-8")
+        (qa_dir / "initial.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (self.run_dir / "qa_report.md").write_text("# QA\n", encoding="utf-8")
+        self.store.append_event(
+            "qa_completed",
+            "qa",
+            "LLM QA completed",
+            {
+                "ok": True,
+                "scenario_path": "qa/attempt_00/qa_scenarios.json",
+                "screenshots": ["qa/attempt_00/initial.png"],
+                "artifact_paths": ["qa/attempt_00/scenario_results.json"],
+                "report_path": "qa_report.md",
+            },
+        )
+
+        events = EventService(self.project_root).list_events("20260429_120000")
+        qa_event = events[-1]
+        artifact_paths = {artifact.path for artifact in qa_event.artifacts}
+
+        self.assertIn("qa/attempt_00/qa_scenarios.json", artifact_paths)
+        self.assertIn("qa/attempt_00/scenario_results.json", artifact_paths)
+        self.assertIn("qa/attempt_00/initial.png", artifact_paths)
+        self.assertIn("qa_report.md", artifact_paths)
+        self.assertEqual(next(artifact for artifact in qa_event.artifacts if artifact.path.endswith(".png")).type, "image")
 
     def test_artifact_service_reads_safe_paths(self) -> None:
         service = ArtifactService(self.project_root)
@@ -463,6 +635,37 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(usage.limits[1].name, "weekly limit")
         self.assertEqual(usage.limits[1].used_percent, 67)
         self.assertEqual(usage.limits[1].remaining_percent, 33)
+
+    def test_provider_service_reads_rate_limits_for_each_codex_home(self) -> None:
+        payload = {
+            "rateLimits": {
+                "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1778057248},
+                "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 1778044493},
+                "planType": "plus",
+            }
+        }
+        calls: list[str | None] = []
+
+        def fake_request(*args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs.get("codex_home") if isinstance(kwargs.get("codex_home"), str) else None)
+            return payload
+
+        env = {key: "" for key in LOCAL_ENV_KEYS}
+        env.update(
+            {
+                "CODEX_HOME": r"D:\codex_profiles\account_1",
+                "CODE_AGENT_CODEX_HOMES": r"D:\codex_profiles\account_1,D:\codex_profiles\account_2",
+            }
+        )
+        with patch.dict(os.environ, env, clear=False), patch("app_services.shutil.which", return_value="codex"), patch(
+            "app_services._codex_app_server_request", side_effect=fake_request
+        ):
+            usages = ProviderService(self.project_root).get_runtime_usages()
+
+        self.assertEqual([usage.account for usage in usages], ["account_1", "account_2"])
+        self.assertEqual(calls, [r"D:\codex_profiles\account_1", r"D:\codex_profiles\account_2"])
+        self.assertTrue(all(usage.ok for usage in usages))
+        self.assertEqual(usages[0].limits[0].remaining_percent, 90)
 
 
 class FakeWorkflowEngine:

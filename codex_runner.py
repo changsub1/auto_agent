@@ -608,7 +608,16 @@ def _clean_child_codex_env(source_env: os._Environ[str]) -> dict[str, str]:
     env = dict(source_env)
     for name in _codex_env_names_to_strip(source_env):
         env.pop(name, None)
+    _apply_utf8_child_env(env)
     return env
+
+
+def _apply_utf8_child_env(env: dict[str, str]) -> None:
+    """Bias nested Codex and its child commands toward UTF-8 text I/O."""
+
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("LANG", "C.UTF-8")
 
 
 def _windows_sandbox_config(sandbox: str) -> str:

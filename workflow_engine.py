@@ -10,6 +10,7 @@ from typing import Any, Callable
 from codex_runner import CodexProcessHandle
 from local_dashboard_runner import (
     LocalRunConfig,
+    make_agentic_qa_baseline_result,
     run_contract_stage_async,
     run_code_agents_stage_async,
     run_integration_stage_async,
@@ -237,26 +238,29 @@ class WorkflowEngine:
             if manual_graph is not None:
                 store.append_event("graph_stage_completed", "system", "Manual graph integration stage completed", {"stage": "integration"})
                 store.append_event("graph_stage_started", "system", "Manual graph QA stage started", {"stage": "qa"})
-            store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
-            qa_result = await asyncio.to_thread(
-                run_mechanical_qa_stage,
-                run_dir,
-                store,
-                generated_app_dir,
-                attempt_name="integrated mechanical QA",
-                attempt_index=0,
-            )
-            qa_result = await run_llm_qa_stage_async(
-                run_dir,
-                logs_dir,
-                store,
-                config,
-                contract_dir,
-                generated_app_dir,
-                qa_result,
-                attempt_index=0,
-                process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
-            )
+            if route.uses_llm_qa:
+                store.set_active_step(stage="llm_qa", agent_id="qa_1", interruptible=True)
+                qa_result = await run_llm_qa_stage_async(
+                    run_dir,
+                    logs_dir,
+                    store,
+                    config,
+                    contract_dir,
+                    generated_app_dir,
+                    make_agentic_qa_baseline_result(run_dir, generated_app_dir, attempt_index=0),
+                    attempt_index=0,
+                    process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+                )
+            else:
+                store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+                qa_result = await asyncio.to_thread(
+                    run_mechanical_qa_stage,
+                    run_dir,
+                    store,
+                    generated_app_dir,
+                    attempt_name="integrated mechanical QA",
+                    attempt_index=0,
+                )
             if _control_action(store.load()) == "cancel":
                 store.set_status("cancelled")
                 return
@@ -291,26 +295,29 @@ class WorkflowEngine:
                     store.set_status("cancelled")
                     return
 
-                store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
-                qa_result = await asyncio.to_thread(
-                    run_mechanical_qa_stage,
-                    run_dir,
-                    store,
-                    generated_app_dir,
-                    attempt_name=f"mechanical QA after fix {fix_iterations_used}",
-                    attempt_index=fix_iterations_used,
-                )
-                qa_result = await run_llm_qa_stage_async(
-                    run_dir,
-                    logs_dir,
-                    store,
-                    config,
-                    contract_dir,
-                    generated_app_dir,
-                    qa_result,
-                    attempt_index=fix_iterations_used,
-                    process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
-                )
+                if route.uses_llm_qa:
+                    store.set_active_step(stage="llm_qa", agent_id="qa_1", interruptible=True)
+                    qa_result = await run_llm_qa_stage_async(
+                        run_dir,
+                        logs_dir,
+                        store,
+                        config,
+                        contract_dir,
+                        generated_app_dir,
+                        make_agentic_qa_baseline_result(run_dir, generated_app_dir, attempt_index=fix_iterations_used),
+                        attempt_index=fix_iterations_used,
+                        process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+                    )
+                else:
+                    store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+                    qa_result = await asyncio.to_thread(
+                        run_mechanical_qa_stage,
+                        run_dir,
+                        store,
+                        generated_app_dir,
+                        attempt_name=f"mechanical QA after fix {fix_iterations_used}",
+                        attempt_index=fix_iterations_used,
+                    )
                 if _control_action(store.load()) == "cancel":
                     store.set_status("cancelled")
                     return
@@ -322,9 +329,9 @@ class WorkflowEngine:
             store.append_event(
                 "worker_checkpoint",
                 "system",
-                "Development and mechanical QA completed",
+                "Development and QA completed",
                 {
-                    "stage": "mechanical_qa",
+                    "stage": "llm_qa" if route.uses_llm_qa else "mechanical_qa",
                     "qa_status": "PASS" if qa_result.ok else "FAIL",
                     "executable_status": qa_result.executable_status,
                     "executable_app_type": qa_result.executable_app_type,
@@ -360,16 +367,8 @@ class WorkflowEngine:
             return
 
         fix_iterations_used = 0
-        store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
-        qa_result = await asyncio.to_thread(
-            run_mechanical_qa_stage,
-            run_dir,
-            store,
-            generated_app_dir,
-            attempt_name="single-agent mechanical QA",
-            attempt_index=0,
-        )
         if route.uses_llm_qa:
+            store.set_active_step(stage="llm_qa", agent_id="qa_1", interruptible=True)
             qa_result = await run_llm_qa_stage_async(
                 run_dir,
                 logs_dir,
@@ -377,9 +376,19 @@ class WorkflowEngine:
                 config,
                 run_dir / "contract",
                 generated_app_dir,
-                qa_result,
+                make_agentic_qa_baseline_result(run_dir, generated_app_dir, attempt_index=0),
                 attempt_index=0,
                 process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+            )
+        else:
+            store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+            qa_result = await asyncio.to_thread(
+                run_mechanical_qa_stage,
+                run_dir,
+                store,
+                generated_app_dir,
+                attempt_name="single-agent mechanical QA",
+                attempt_index=0,
             )
         if _control_action(store.load()) == "cancel":
             store.set_status("cancelled")
@@ -414,16 +423,8 @@ class WorkflowEngine:
                 store.set_status("cancelled")
                 return
 
-            store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
-            qa_result = await asyncio.to_thread(
-                run_mechanical_qa_stage,
-                run_dir,
-                store,
-                generated_app_dir,
-                attempt_name=f"single-agent mechanical QA after fix {fix_iterations_used}",
-                attempt_index=fix_iterations_used,
-            )
             if route.uses_llm_qa:
+                store.set_active_step(stage="llm_qa", agent_id="qa_1", interruptible=True)
                 qa_result = await run_llm_qa_stage_async(
                     run_dir,
                     logs_dir,
@@ -431,9 +432,19 @@ class WorkflowEngine:
                     config,
                     run_dir / "contract",
                     generated_app_dir,
-                    qa_result,
+                    make_agentic_qa_baseline_result(run_dir, generated_app_dir, attempt_index=fix_iterations_used),
                     attempt_index=fix_iterations_used,
                     process_started=lambda agent_id, handle: register_process("llm_qa", agent_id, handle),
+                )
+            else:
+                store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+                qa_result = await asyncio.to_thread(
+                    run_mechanical_qa_stage,
+                    run_dir,
+                    store,
+                    generated_app_dir,
+                    attempt_name=f"single-agent mechanical QA after fix {fix_iterations_used}",
+                    attempt_index=fix_iterations_used,
                 )
             if _control_action(store.load()) == "cancel":
                 store.set_status("cancelled")
@@ -444,9 +455,9 @@ class WorkflowEngine:
         store.append_event(
             "worker_checkpoint",
             "system",
-            "Single-code development and mechanical QA completed",
+            "Single-code development and QA completed",
             {
-                "stage": "mechanical_qa",
+                "stage": "llm_qa" if route.uses_llm_qa else "mechanical_qa",
                 "route": route.mode,
                 "qa_status": "PASS" if qa_result.ok else "FAIL",
                 "executable_status": qa_result.executable_status,
@@ -552,11 +563,10 @@ def _route_from_manual_graph(graph: dict[str, Any], fallback: RoutingDecision) -
     code_count = max(1, len(code_agents) or fallback.code_agent_count)
     qa_count = max(0, len(qa_agents))
     mode = "parallel" if uses_integrator or code_count > 1 else "balanced"
-    pipeline = ["manual_graph", "code_agents" if code_count > 1 else "code_1", "mechanical_qa"]
+    qa_stage = "qa_agent" if qa_count else "mechanical_qa"
+    pipeline = ["manual_graph", "code_agents" if code_count > 1 else "code_1", qa_stage]
     if uses_integrator:
-        pipeline = ["manual_graph", "architect_contract", "scaffold", "code_agents", "integrator", "mechanical_qa"]
-    if qa_count:
-        pipeline.append("qa_agent")
+        pipeline = ["manual_graph", "architect_contract", "scaffold", "code_agents", "integrator", qa_stage]
     return RoutingDecision(
         requested_mode="manual",
         mode=mode,
@@ -634,16 +644,18 @@ def workflow_from_route(route: RoutingDecision) -> dict[str, Any]:
     )
     if route.uses_integrator:
         stages.append({"id": "integration", "type": "integration", "agents": ["integrator"], "after": ["code"]})
-    stages.append({"id": "qa", "type": "qa", "agents": ["mechanical_qa"], "after": ["code"]})
     if route.uses_llm_qa:
         stages.append(
             {
-                "id": "llm_qa",
+                "id": "qa",
                 "type": "qa",
                 "agents": [f"qa_{index}" for index in range(1, route.qa_agent_count + 1)],
+                "after": ["integration"] if route.uses_integrator else ["code"],
                 "parallel": route.qa_agent_count > 1,
             }
         )
+    else:
+        stages.append({"id": "qa", "type": "qa", "agents": ["mechanical_qa"], "after": ["code"], "parallel": False})
     stages.append({"id": "approval_qa", "type": "approval", "after": ["qa"]})
     return {
         "mode": route.requested_mode,

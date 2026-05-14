@@ -100,6 +100,32 @@ For a web app, prefer:
 
 Use `127.0.0.1` instead of a public host.
 
+## QA Workspace Guidance
+
+The manifest still describes how to set up, check, and run the app. In
+`fast` or no-LLM-QA routes, Orchestra may use the manifest with the mechanical
+QA runner. In `balanced` and `manual` routes with a QA Agent, the manifest is
+context for the QA Workspace Agent rather than a required mechanical scenario
+contract.
+
+The QA Workspace Agent receives:
+
+1. a copy of the completed app in `qa_workspace/app`,
+2. context files including this manifest when present,
+3. `qa_tools/command_probe.py`,
+4. `qa_tools/file_probe.py`,
+5. `qa_tools/browser_probe.py`.
+
+The QA Agent decides which tool to use and must write:
+
+- `evidence/verdict.json`
+- `evidence/qa_findings.md`
+- `evidence/command_log.jsonl`
+
+For visual/browser apps, PASS requires screenshot evidence. For desktop GUI
+apps, prefer self-test, unit-test, import, or CLI smoke commands. Do not rely on
+OS-wide mouse/keyboard automation.
+
 ## CLI App Guidance
 
 For a CLI app, include at least one smoke command:
