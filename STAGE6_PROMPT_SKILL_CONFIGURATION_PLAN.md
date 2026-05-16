@@ -136,7 +136,9 @@ The current version already has important foundations:
 
 Current limitations:
 
-- Many agent role prompts are still hard-coded inside `agents.py`.
+- Most default agent role prompts have been moved out of `agents.py` into
+  `agent_prompts/*.md`. `agents.py` should now be treated as a task prompt
+  builder that injects run context and stage-specific inputs.
 - The GUI System Prompt currently behaves more like an added instruction block
   than the full editable agent role template.
 - `Effective Prompt Preview` does not show the complete prompt actually sent to
@@ -301,6 +303,7 @@ agent_prompts/
   code_agent.md
   integrator.md
   qa_agent.md
+  developer.md
 ```
 
 2. Add a small prompt-template loader, for example `prompt_templates.py`:
@@ -348,6 +351,10 @@ Implemented notes:
   loading, and in-code fallbacks.
 - Updated `agents.py` and Planner C helper prompts to load their top-level role
   text from the template loader.
+- Moved stable output formats, workspace constraints, manifest rules, QA
+  verdict rules, and browser action JSON examples into `agent_prompts/*.md`.
+- Reduced `agents.py` prompt builders so they mainly inject run context,
+  previous-agent outputs, assignments, feedback, and stage-specific input data.
 - Updated `PromptService` so default GUI System Prompt text is loaded from the
   template loader.
 - Added tests for template loading and `code_*` / `qa_*` mapping.

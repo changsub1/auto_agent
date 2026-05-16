@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,11 @@ from workspace_manager import create_generated_app_dir
 
 RUN_MODES = ("planning_only", "contract_only", "scaffold_only", "full_run")
 REASONING_EFFORTS = ("", "minimal", "low", "medium", "high", "xhigh")
+
+
+def _debug_artifacts_enabled() -> bool:
+    value = os.environ.get("ORCHESTRA_DEBUG_ARTIFACTS", "")
+    return value.strip().lower() in {"1", "true", "yes", "on", "debug"}
 
 
 @dataclass(frozen=True)
@@ -659,6 +665,8 @@ async def run_code_agents_stage_async(
         scaffold_dir=scaffold_dir,
         workspaces_dir=workspaces_dir,
     )
+    for assignment in assignments:
+        _copy_run_inputs_to_workspace(run_dir, assignment.workspace_dir)
     store.record_artifact("agent_workspaces", workspaces_dir)
     store.record_artifact("agent_outputs", outputs_dir)
     store.write_artifact(
@@ -780,6 +788,7 @@ async def run_integration_stage_async(
     store.append_transcript("Integrator Output", integration_result.stdout)
     normalize_windows_command_files(merged_app_dir)
     generated_app_dir = reset_generated_app_from_merged(run_dir, merged_app_dir)
+    _copy_run_inputs_to_workspace(run_dir, generated_app_dir)
     normalize_windows_command_files(generated_app_dir)
     store.record_artifact("generated_app", generated_app_dir)
     _raise_if_cancelled(store, "Development cancelled")
@@ -990,6 +999,28 @@ async def run_llm_qa_stage_async(
                 process_started=_agent_process_started(process_started, agent_id),
                 image_paths=mechanical_result.screenshots,
             )
+            host_browser_evidence = await asyncio.to_thread(
+                _run_host_browser_evidence,
+                workspace_dir,
+                mechanical_result=mechanical_result,
+            )
+            if host_browser_evidence.get("ran"):
+                followup_result = await agent.run_workspace_qa_followup_async(
+                    workspace_dir,
+                    json.dumps(host_browser_evidence, ensure_ascii=False, indent=2),
+                    session_id=result.session_id or store.get_agent_session_id(agent_id),
+                    process_started=_agent_process_started(process_started, agent_id),
+                    image_paths=[
+                        Path(path)
+                        for path in host_browser_evidence.get("screenshot_paths", [])
+                        if isinstance(path, str)
+                    ],
+                )
+                result = _combine_codex_results(
+                    result,
+                    followup_result,
+                    separator="## Host Browser Evidence Follow-up",
+                )
         except CodexExecutionError as exc:
             agent_error = str(exc)
             _write_workspace_fallback_verdict(
@@ -1032,14 +1063,10 @@ async def run_llm_qa_stage_async(
         workspace_dir = Path(review["workspace_dir"])
         agent_error = str(review.get("agent_error") or "")
 
-        output_path = store.write_artifact(
-            f"qa/attempt_{attempt_index:02d}/{agent_id}_workspace_qa.md",
-            result.stdout or agent_error or "QA workspace agent produced no stdout.",
-            artifact_name=f"{agent_id}_workspace_qa",
-        )
+        output_path = run_dir / "qa" / f"attempt_{attempt_index:02d}" / f"{agent_id}_workspace_qa.md"
+        _write_text(output_path, result.stdout or agent_error or "QA workspace agent produced no stdout.")
         verdict, verdict_path, verdict_error = _load_or_create_workspace_verdict(workspace_dir)
         workspace_screenshots = _collect_qa_workspace_screenshots(workspace_dir)
-        workspace_artifacts = _collect_qa_workspace_artifacts(workspace_dir)
         hard_policy_errors = _workspace_hard_policy_errors(
             verdict=verdict,
             workspace_dir=workspace_dir,
@@ -1051,6 +1078,26 @@ async def run_llm_qa_stage_async(
             verdict, _, verdict_error = _load_or_create_workspace_verdict(workspace_dir)
 
         status = _workspace_verdict_status(verdict)
+        findings_path = workspace_dir / "evidence" / "qa_findings.md"
+        command_log_path = workspace_dir / "evidence" / "command_log.jsonl"
+        scratch_cleanup = _cleanup_qa_scratch(workspace_dir)
+        pruned_debug_artifacts = _prune_qa_workspace_debug_artifacts(workspace_dir)
+        manifest_path = _write_qa_evidence_manifest(
+            workspace_dir=workspace_dir,
+            agent_id=agent_id,
+            verdict=verdict,
+            verdict_path=verdict_path,
+            findings_path=findings_path,
+            command_log_path=command_log_path,
+            screenshots=workspace_screenshots,
+            mechanical_result=mechanical_result,
+            status=status,
+            verdict_error=verdict_error,
+            hard_policy_errors=hard_policy_errors,
+            scratch_cleanup=scratch_cleanup,
+            pruned_debug_artifacts=pruned_debug_artifacts,
+        )
+        workspace_artifacts = _collect_qa_workspace_artifacts(workspace_dir)
         if status != "PASS":
             failed_reviews.append(f"{agent_id}: {status}")
         if hard_policy_errors:
@@ -1058,7 +1105,7 @@ async def run_llm_qa_stage_async(
         if verdict_error:
             failed_reviews.append(f"{agent_id}: verdict error - {verdict_error}")
 
-        artifact_paths.extend([output_path, *workspace_artifacts])
+        artifact_paths.extend(workspace_artifacts)
         screenshots.extend(workspace_screenshots)
         affected_paths = _merge_unique(
             [
@@ -1082,25 +1129,29 @@ async def run_llm_qa_stage_async(
             reasoning_effort=result.reasoning_effort,
             last_step=f"workspace_qa_attempt_{attempt_index}",
         )
-        findings_path = workspace_dir / "evidence" / "qa_findings.md"
-        command_log_path = workspace_dir / "evidence" / "command_log.jsonl"
+        primary_event_path = findings_path if findings_path.exists() else manifest_path
         store.append_event(
             "agent_output",
             agent_id,
             "QA Workspace Agent completed",
             {
-                "path": store.to_relative(output_path),
+                "path": store.to_relative(primary_event_path),
+                "agent_output_path": store.to_relative(output_path),
                 "workspace_path": store.to_relative(workspace_dir),
+                "evidence_manifest_path": store.to_relative(manifest_path),
                 "verdict_path": store.to_relative(verdict_path),
                 "findings_path": store.to_relative(findings_path) if findings_path.exists() else None,
                 "command_log_path": store.to_relative(command_log_path) if command_log_path.exists() else None,
+                "scratch_cleanup_removed": len(scratch_cleanup.get("removed", [])),
+                "scratch_cleanup_errors": scratch_cleanup.get("errors", []),
+                "debug_artifacts_pruned": pruned_debug_artifacts,
                 "qa_status": status,
                 "verdict_error": verdict_error,
                 "hard_policy_errors": hard_policy_errors,
                 "affected_paths": _workspace_verdict_list(verdict, "affected_paths"),
                 "suspected_owners": _workspace_verdict_list(verdict, "suspected_owners"),
                 "screenshots": [store.to_relative(path) for path in workspace_screenshots],
-                "artifact_paths": [store.to_relative(path) for path in [output_path, *workspace_artifacts]],
+                "artifact_paths": [store.to_relative(path) for path in workspace_artifacts],
                 **_session_event_data(result),
             },
         )
@@ -1290,6 +1341,7 @@ async def run_targeted_fix_stage_async(
     merged_app_dir = run_dir / "integration" / "merged_app"
     normalize_windows_command_files(merged_app_dir)
     generated_app_dir = reset_generated_app_from_merged(run_dir, merged_app_dir)
+    _copy_run_inputs_to_workspace(run_dir, generated_app_dir)
     normalize_windows_command_files(generated_app_dir)
     store.record_artifact("generated_app", generated_app_dir)
     return generated_app_dir
@@ -1353,6 +1405,7 @@ async def run_single_code_stage_async(
     process_started: Callable[[str, CodexProcessHandle], None] | None = None,
 ) -> tuple[Path, CodeAgentAssignment, CodexResult]:
     generated_app_dir = create_generated_app_dir(run_dir)
+    _copy_run_inputs_to_workspace(run_dir, generated_app_dir)
     outputs_dir = create_agent_outputs_dir(run_dir)
     assignment = build_single_code_assignment(config, generated_app_dir)
     assignment_summary = render_assignment_summary([assignment])
@@ -1670,6 +1723,9 @@ def _session_event_data(result: CodexResult) -> dict[str, str | None]:
 
 
 def _snapshot_final_prompts_from_logs(store: StateStore) -> dict[str, str]:
+    if not _debug_artifacts_enabled():
+        return {}
+
     logs_dir = store.run_dir / "logs"
     if not logs_dir.exists():
         return {}
@@ -1864,6 +1920,30 @@ def _guess_generated_app_type(generated_app_dir: Path) -> str:
     return "unknown"
 
 
+def _copy_run_inputs_to_workspace(run_dir: Path, workspace_dir: Path) -> Path | None:
+    source_dir = Path(run_dir) / "inputs"
+    if not source_dir.exists() or not source_dir.is_dir():
+        return None
+    target_dir = Path(workspace_dir) / "inputs"
+    source_resolved = source_dir.resolve()
+    target_resolved = target_dir.resolve()
+    workspace_resolved = Path(workspace_dir).resolve()
+    if source_resolved == target_resolved:
+        return target_dir
+    try:
+        target_resolved.relative_to(workspace_resolved)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to copy run inputs outside workspace: {target_dir}") from exc
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    shutil.copytree(
+        source_dir,
+        target_dir,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return target_dir
+
+
 def _prepare_qa_workspace(
     *,
     run_dir: Path,
@@ -1892,6 +1972,7 @@ def _prepare_qa_workspace(
         app_copy_dir,
         ignore=shutil.ignore_patterns(".git", ".venv", "node_modules", "__pycache__"),
     )
+    _copy_run_inputs_to_workspace(run_dir, workspace_dir)
 
     _write_text(context_dir / "user_request.md", user_request)
     _write_text(context_dir / "contract_bundle.md", contract_bundle or "(no contract bundle)")
@@ -1908,11 +1989,20 @@ def _prepare_qa_workspace(
                 "This directory is the QA Agent's isolated working area.",
                 "",
                 "- Inspect `app/` as the generated app under test.",
+                "- If present, inspect `inputs/` as the read-only copy of files the user attached to the run.",
+                "- The app under test may also contain `app/inputs/` when the code stage received attached files.",
                 "- Use `qa_tools/` for safe evidence-producing probes instead of ad-hoc global automation.",
                 "- On Windows, prefer `qa_tools\\*.cmd` launchers so probes use Orchestra's Python environment.",
+                "- Before reading files, use `qa_tools\\file_probe.cmd` to record size, bounded preview, and targeted contains checks.",
+                "- Treat files over 128 KB as large. Do not paste full source, logs, JSON, bundles, stdout, or stderr into findings.",
+                "- Avoid dependency/build/cache folders unless directly relevant: node_modules, .venv, dist, build, .next, .git, __pycache__.",
+                "- Use `qa_tools\\command_probe.cmd --max-output-chars ...` for commands that may print large output.",
                 "- Write probes, notes, logs, and verdict files under `evidence/`.",
+                "- Required evidence files: `evidence/verdict.json`, `evidence/qa_findings.md`, and `evidence/command_log.jsonl`.",
+                "- Orchestra will generate `evidence/evidence_manifest.json`; do not duplicate large stdout/stderr content in findings.",
                 "- Write screenshots under `screenshots/`.",
                 "- Use `scratch/` for temporary experiments.",
+                "- Browser profiles/cache/crashpad files under `scratch/` are cleaned automatically after QA.",
                 "- Do not write outside this QA workspace.",
                 "",
             ]
@@ -2122,12 +2212,441 @@ def _collect_qa_workspace_screenshots(workspace_dir: Path) -> list[Path]:
 
 
 def _collect_qa_workspace_artifacts(workspace_dir: Path) -> list[Path]:
-    roots = [workspace_dir / "evidence", workspace_dir / "screenshots"]
     paths: list[Path] = []
-    for root in roots:
-        if root.exists():
-            paths.extend(path for path in root.rglob("*") if path.is_file())
+    for relative_path in [
+        "evidence/evidence_manifest.json",
+        "evidence/verdict.json",
+        "evidence/qa_findings.md",
+        "evidence/command_log.jsonl",
+        "evidence/host_browser_evidence.json",
+    ]:
+        path = workspace_dir / relative_path
+        if path.exists() and path.is_file():
+            paths.append(path)
+    browser_dir = workspace_dir / "evidence" / "browser"
+    if _debug_artifacts_enabled() and browser_dir.exists():
+        for pattern in ["*_result.json", "*_console.json"]:
+            paths.extend(path for path in browser_dir.rglob(pattern) if path.is_file())
     return _unique_paths(paths)
+
+
+def _prune_qa_workspace_debug_artifacts(workspace_dir: Path) -> list[str]:
+    if _debug_artifacts_enabled():
+        return []
+
+    targets = [
+        workspace_dir / "qa_tools",
+        workspace_dir / "scratch",
+        workspace_dir / "context",
+        workspace_dir / "app",
+        workspace_dir / "inputs",
+        workspace_dir / "README_QA_WORKSPACE.md",
+        workspace_dir / "evidence" / "files",
+        workspace_dir / "evidence" / "commands",
+        workspace_dir / "evidence" / "browser",
+    ]
+    removed: list[str] = []
+    for target in targets:
+        if not target.exists():
+            continue
+        relative_path = _workspace_relative(workspace_dir, target)
+        try:
+            _remove_workspace_child(workspace_dir, target)
+        except OSError:
+            continue
+        removed.append(relative_path)
+    return removed
+
+
+def _cleanup_qa_scratch(workspace_dir: Path) -> dict[str, Any]:
+    scratch_dir = workspace_dir / "scratch"
+    summary: dict[str, Any] = {
+        "version": 1,
+        "removed": [],
+        "errors": [],
+    }
+    if not scratch_dir.exists():
+        _write_text(workspace_dir / "evidence" / "scratch_cleanup.json", json.dumps(summary, ensure_ascii=False, indent=2))
+        return summary
+
+    candidates: list[Path] = []
+    for pattern in [
+        "chrome-profile*",
+        "chromium-profile*",
+        "playwright-profile*",
+        "browser-profile*",
+        "tmp-playwright*",
+        "*Crashpad*",
+        "crashpad*",
+    ]:
+        candidates.extend(path for path in scratch_dir.glob(pattern))
+        candidates.extend(path for path in scratch_dir.rglob(pattern))
+
+    transient_dir_names = {
+        "cache",
+        "code cache",
+        "gpucache",
+        "shadercache",
+        "dawncache",
+        "blob_storage",
+        "browsermetrics",
+    }
+    candidates.extend(
+        path
+        for path in scratch_dir.rglob("*")
+        if path.is_dir() and path.name.strip().lower() in transient_dir_names
+    )
+
+    for path in sorted(_unique_paths(candidates), key=lambda item: len(item.parts), reverse=True):
+        if not path.exists():
+            continue
+        try:
+            _remove_workspace_child(workspace_dir, path)
+            summary["removed"].append(_workspace_relative(workspace_dir, path))
+        except OSError as exc:
+            summary["errors"].append(
+                {
+                    "path": _workspace_relative(workspace_dir, path),
+                    "error": str(exc),
+                }
+            )
+
+    _write_text(workspace_dir / "evidence" / "scratch_cleanup.json", json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
+def _remove_workspace_child(workspace_dir: Path, target_path: Path) -> None:
+    root = Path(workspace_dir).resolve()
+    target = Path(target_path).resolve()
+    if root != target and root not in target.parents:
+        raise OSError(f"Refusing to remove path outside QA workspace: {target_path}")
+    if target == root:
+        raise OSError("Refusing to remove the QA workspace root.")
+    if target.is_dir():
+        shutil.rmtree(target)
+        return
+    if target.exists():
+        target.unlink()
+
+
+def _write_qa_evidence_manifest(
+    *,
+    workspace_dir: Path,
+    agent_id: str,
+    verdict: dict[str, Any],
+    verdict_path: Path,
+    findings_path: Path,
+    command_log_path: Path,
+    screenshots: list[Path],
+    mechanical_result: QAResult,
+    status: str,
+    verdict_error: str | None,
+    hard_policy_errors: list[str],
+    scratch_cleanup: dict[str, Any],
+    pruned_debug_artifacts: list[str],
+) -> Path:
+    evidence_dir = workspace_dir / "evidence"
+    manifest_path = evidence_dir / "evidence_manifest.json"
+    browser_summary_path = evidence_dir / "host_browser_evidence.json"
+    browser_summary = _read_json_file(browser_summary_path)
+    payload = {
+        "version": 1,
+        "agent_id": agent_id,
+        "status": status,
+        "ok": status == "PASS" and not verdict_error and not hard_policy_errors,
+        "summary": str(verdict.get("summary") or ""),
+        "executable_status": mechanical_result.executable_status,
+        "executable_app_type": mechanical_result.executable_app_type,
+        "verdict": {
+            "path": _workspace_relative(workspace_dir, verdict_path),
+            "status": status,
+            "error": verdict_error,
+            "findings": _workspace_verdict_list(verdict, "findings"),
+            "affected_paths": _workspace_verdict_list(verdict, "affected_paths"),
+            "suspected_owners": _workspace_verdict_list(verdict, "suspected_owners"),
+        },
+        "core_evidence": [
+            _manifest_file_entry(workspace_dir, verdict_path, kind="verdict"),
+            _manifest_file_entry(workspace_dir, findings_path, kind="findings"),
+            _manifest_file_entry(workspace_dir, command_log_path, kind="command_log"),
+        ],
+        "screenshots": [
+            _manifest_file_entry(workspace_dir, screenshot_path, kind="screenshot")
+            for screenshot_path in screenshots
+            if screenshot_path.exists() and screenshot_path.is_file()
+        ],
+        "browser_evidence": {
+            "summary_path": _workspace_relative(workspace_dir, browser_summary_path) if browser_summary_path.exists() else None,
+            "status": browser_summary.get("status"),
+            "reason": browser_summary.get("reason"),
+            "ran": browser_summary.get("ran"),
+            "result_paths": browser_summary.get("result_paths") if isinstance(browser_summary.get("result_paths"), list) else [],
+            "screenshot_paths": [
+                _workspace_relative(workspace_dir, Path(path))
+                for path in browser_summary.get("screenshot_paths", [])
+                if isinstance(path, str)
+            ]
+            if isinstance(browser_summary.get("screenshot_paths"), list)
+            else [],
+        },
+        "hard_policy_errors": hard_policy_errors,
+        "scratch_cleanup": {
+            "path": "evidence/scratch_cleanup.json",
+            "removed_count": len(scratch_cleanup.get("removed", [])),
+            "errors": scratch_cleanup.get("errors") if isinstance(scratch_cleanup.get("errors"), list) else [],
+        },
+        "artifact_mode": {
+            "debug_artifacts_enabled": _debug_artifacts_enabled(),
+            "pruned_debug_artifacts": pruned_debug_artifacts,
+        },
+        "notes": [
+            "Manifest is generated by Orchestra after QA Agent execution.",
+            "Normal mode keeps only presentation-friendly QA evidence. Set ORCHESTRA_DEBUG_ARTIFACTS=1 to retain copied apps, tools, scratch files, and probe internals.",
+        ],
+    }
+    payload["core_evidence"] = [entry for entry in payload["core_evidence"] if entry is not None]
+    _write_text(manifest_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    return manifest_path
+
+
+def _manifest_file_entry(workspace_dir: Path, path: Path, *, kind: str) -> dict[str, Any] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    stat = path.stat()
+    return {
+        "kind": kind,
+        "path": _workspace_relative(workspace_dir, path),
+        "size_bytes": stat.st_size,
+    }
+
+
+def _run_host_browser_evidence(workspace_dir: Path, *, mechanical_result: QAResult) -> dict[str, Any]:
+    summary_path = workspace_dir / "evidence" / "host_browser_evidence.json"
+    command_log_path = workspace_dir / "evidence" / "command_log.jsonl"
+    summary: dict[str, Any] = {
+        "version": 1,
+        "tool": "host_browser_runner",
+        "ran": False,
+        "status": "SKIPPED",
+        "reason": "",
+        "result_paths": [],
+        "screenshot_paths": [],
+        "runs": [],
+    }
+    if _collect_qa_workspace_screenshots(workspace_dir):
+        summary["reason"] = "workspace already contains screenshot evidence"
+        _write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+        return summary
+    if not _workspace_needs_host_browser(workspace_dir, mechanical_result):
+        summary["reason"] = f"app type does not require host browser evidence: {mechanical_result.executable_app_type or 'unknown'}"
+        _write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+        return summary
+
+    entry = _host_browser_entry(workspace_dir)
+    if not entry:
+        summary["status"] = "UNSUPPORTED"
+        summary["reason"] = "no browser entrypoint found under qa_workspace/app"
+        _write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+        _append_jsonl(command_log_path, summary)
+        return summary
+
+    action_files = _host_browser_action_files(workspace_dir)
+    targets: list[Path | None] = action_files[:3] or [None]
+    probe_command = _host_browser_probe_base_command(workspace_dir)
+    if not probe_command:
+        summary["status"] = "UNSUPPORTED"
+        summary["reason"] = "trusted project browser_probe tool was not available"
+        _write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+        _append_jsonl(command_log_path, summary)
+        return summary
+
+    probe_env = _utf8_subprocess_env()
+    probe_env["ORCHESTRA_QA_WORKSPACE_ROOT"] = str(workspace_dir.resolve())
+    summary["ran"] = True
+    summary["status"] = "PASS"
+    for index, action_file in enumerate(targets, start=1):
+        name = _host_browser_evidence_name(action_file, index)
+        command = [
+            *probe_command,
+            "--name",
+            name,
+            "--entry",
+            entry,
+        ]
+        if action_file is not None:
+            command.extend(["--action-file", _workspace_relative(workspace_dir, action_file)])
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(workspace_dir),
+                env=probe_env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            completed = subprocess.CompletedProcess(
+                command,
+                1,
+                _coerce_subprocess_text(exc.stdout),
+                _coerce_subprocess_text(exc.stderr) or str(exc),
+            )
+        except OSError as exc:
+            completed = subprocess.CompletedProcess(command, 1, "", str(exc))
+        result_path = workspace_dir / "evidence" / "browser" / f"{name}_result.json"
+        payload = _read_json_file(result_path)
+        status = str(payload.get("status") or ("PASS" if completed.returncode == 0 else "FAIL"))
+        screenshots = [
+            str((workspace_dir / str(path)).resolve())
+            for path in payload.get("screenshots", [])
+            if isinstance(path, str)
+        ]
+        run_record = {
+            "name": name,
+            "action_file": _workspace_relative(workspace_dir, action_file) if action_file is not None else None,
+            "entry": entry,
+            "status": status,
+            "returncode": completed.returncode,
+            "result_path": _workspace_relative(workspace_dir, result_path) if result_path.exists() else None,
+            "screenshots": [_workspace_relative(workspace_dir, Path(path)) for path in screenshots],
+            "stdout_preview": _short_text(completed.stdout),
+            "stderr_preview": _short_text(completed.stderr),
+        }
+        summary["runs"].append(run_record)
+        if result_path.exists():
+            summary["result_paths"].append(_workspace_relative(workspace_dir, result_path))
+        summary["screenshot_paths"].extend(screenshots)
+        if status != "PASS":
+            summary["status"] = "FAIL"
+
+    summary["screenshot_paths"] = _dedupe_strings(summary["screenshot_paths"])
+    if not summary["screenshot_paths"] and summary["status"] == "PASS":
+        summary["status"] = "INCONCLUSIVE"
+        summary["reason"] = "host browser runner completed without screenshot files"
+    else:
+        summary["reason"] = "host browser runner collected browser evidence outside Codex sandbox"
+    _write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+    _append_jsonl(command_log_path, {**summary, "summary_path": _workspace_relative(workspace_dir, summary_path)})
+    return summary
+
+
+def _workspace_needs_host_browser(workspace_dir: Path, mechanical_result: QAResult) -> bool:
+    app_type = (mechanical_result.executable_app_type or "").strip().lower()
+    if app_type in {"static_html", "browser", "web", "spa"}:
+        return True
+    return (workspace_dir / "app" / "index.html").exists()
+
+
+def _host_browser_entry(workspace_dir: Path) -> str:
+    candidates = [
+        workspace_dir / "app" / "index.html",
+        workspace_dir / "app" / "dist" / "index.html",
+        workspace_dir / "app" / "public" / "index.html",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return _workspace_relative(workspace_dir, candidate)
+    return ""
+
+
+def _host_browser_action_files(workspace_dir: Path) -> list[Path]:
+    scratch_dir = workspace_dir / "scratch"
+    if not scratch_dir.exists():
+        return []
+    preferred = [
+        scratch_dir / "browser_actions.json",
+        scratch_dir / "slingshot_actions.json",
+    ]
+    action_files: list[Path] = [path for path in preferred if path.exists() and path.is_file()]
+    action_files.extend(path for path in sorted(scratch_dir.glob("*actions*.json")) if path.is_file())
+    return _unique_paths(action_files)
+
+
+def _host_browser_probe_base_command(workspace_dir: Path) -> list[str]:
+    script = Path(__file__).resolve().parent / "qa_tools" / "browser_probe.py"
+    if script.exists():
+        return [sys.executable, str(script)]
+    return []
+
+
+def _host_browser_evidence_name(action_file: Path | None, index: int) -> str:
+    if action_file is None:
+        return "host-browser"
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", action_file.stem).strip("-")
+    return f"host-{stem or f'browser-{index:02d}'}"
+
+
+def _workspace_relative(workspace_dir: Path, path: Path | str) -> str:
+    target = Path(path)
+    if not target.is_absolute():
+        return target.as_posix()
+    try:
+        return target.relative_to(workspace_dir).as_posix()
+    except ValueError:
+        return str(target)
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _short_text(value: str, *, max_chars: int = 2000) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n[truncated]"
+
+
+def _coerce_subprocess_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _combine_codex_results(first: CodexResult, second: CodexResult, *, separator: str) -> CodexResult:
+    stdout = "\n\n".join(part for part in [first.stdout.strip(), separator, second.stdout.strip()] if part)
+    stderr = "\n\n".join(part for part in [first.stderr.strip(), second.stderr.strip()] if part)
+    return CodexResult(
+        stdout=stdout,
+        stderr=stderr,
+        returncode=second.returncode,
+        session_id=second.session_id or first.session_id,
+        resumed_session_id=second.resumed_session_id or first.resumed_session_id,
+        model=second.model or first.model,
+        reasoning_effort=second.reasoning_effort or first.reasoning_effort,
+        effective_approval=second.effective_approval or first.effective_approval,
+        effective_sandbox=second.effective_sandbox or first.effective_sandbox,
+    )
+
+
+def _utf8_subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("LANG", "C.UTF-8")
+    return env
 
 
 def _unique_paths(paths: list[Path]) -> list[Path]:

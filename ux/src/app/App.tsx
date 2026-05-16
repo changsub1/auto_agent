@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AgentProviderConfig, AppConfig, RunSummary, WorkflowGraph, createRun, listRuns, loadConfig } from "./api";
+import { AgentProviderConfig, AppConfig, RunAttachmentInput, RunSummary, WorkflowGraph, createRun, listRuns, loadConfig } from "./api";
 import { AgentRosterPage } from "./components/agent-roster-page";
 import { RunMonitorPage } from "./components/run-monitor-page";
 
@@ -12,6 +12,7 @@ type StartRunOptions = {
   codexHome?: string | null;
   agentConfigs?: AgentProviderConfig[];
   workflowGraph?: WorkflowGraph | null;
+  attachments?: RunAttachmentInput[];
 };
 
 export default function App() {
@@ -90,6 +91,7 @@ export default function App() {
             : undefined,
         agent_configs: options?.agentConfigs,
         workflow_graph: options?.workflowGraph,
+        attachments: options?.attachments,
       });
       setActiveRunId(detail.run_id);
       await refreshRuns();

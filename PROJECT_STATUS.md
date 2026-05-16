@@ -1,6 +1,6 @@
 # Project Status
 
-최종 갱신: 2026-05-14
+최종 갱신: 2026-05-16
 
 ## 요약
 
@@ -164,3 +164,18 @@ npm run build
 - QA 도구 확장
 - 강한 OS 격리 기반 QA sandbox
 - Windows installer packaging
+## Stage8 Plan / Current Status
+
+다음 작업은 `STAGE8_ARTIFACT_TOKEN_BUDGET_PLAN.md`를 기준으로 진행합니다.
+
+핵심 목표:
+
+- Browser QA를 Codex sandbox 내부 실행이 아니라 Orchestra host-runner 실행으로 분리 (Stage8A 구현 완료)
+- 실제 route에 쓰인 agent만 prompt snapshot 저장 (Stage8B 구현 완료)
+- `state.json`, `events.jsonl`에는 prompt 전문 대신 preset, skill id, 글자 수, hash, settings path만 저장 (Stage8B 구현 완료)
+- 실제 실행용 prompt 전문은 `prompts/prompt_settings.json`에만 보관하고 workflow resume 시 이 파일에서 복원 (Stage8B 구현 완료)
+- QA evidence를 `evidence/evidence_manifest.json` 중심으로 묶고, 타임라인에는 findings/verdict/command_log/screenshots/browser result 중심으로 노출 (Stage8C 구현 완료)
+- QA browser profile/cache/crashpad 임시 파일을 `qa_workspace/scratch` 내부로 제한하고 QA 종료 후 자동 삭제 (Stage8D 구현 완료)
+- QA Agent와 QA tools가 큰 파일/큰 stdout을 전문으로 읽거나 저장하지 않도록 bounded preview, streaming contains, output truncation guard 적용 (Stage8E 구현 완료)
+- 한글 request/event/transcript/artifact/Codex stdout 경로를 UTF-8 round-trip 테스트로 검증하고 저장 helper를 replacement-safe UTF-8 write로 고정 (Stage8F 구현 완료)
+- `system + skill + effective_preview`, `logs/*_prompt.txt + prompts/final/*` 중복 추가 제거

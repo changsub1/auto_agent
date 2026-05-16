@@ -50,6 +50,10 @@ DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
         "You are a QA Agent in a Codex CLI multi-agent development workflow.\n"
         "Review completed app evidence against the approved plan, contract, mechanical QA report, and screenshots."
     ),
+    "developer": (
+        "You are Developer Agent in a Codex CLI multi-agent development workflow.\n"
+        "Create or fix the app files in the current generated app directory."
+    ),
 }
 
 

@@ -41,6 +41,7 @@ class AsyncCodexRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "print('approval: full-auto', file=sys.stderr, flush=True)",
                 "print('sandbox: workspace-write', file=sys.stderr, flush=True)",
                 "print('session id: 123e4567-e89b-12d3-a456-426614174000', file=sys.stderr, flush=True)",
+                "print('한글 출력', flush=True)",
                 "time.sleep(0.4)",
                 "print('out-end', flush=True)",
             ]
@@ -53,11 +54,13 @@ class AsyncCodexRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stdout_files), 1)
         partial_stdout = stdout_files[0].read_text(encoding="utf-8")
         self.assertIn("out-start", partial_stdout)
+        self.assertIn("한글 출력", partial_stdout)
         self.assertNotIn("out-end", partial_stdout)
 
         result = await task
         self.assertEqual(result.returncode, 0)
         self.assertIn("out-end", result.stdout)
+        self.assertIn("한글 출력", result.stdout)
         self.assertEqual(result.session_id, "123e4567-e89b-12d3-a456-426614174000")
         self.assertEqual(result.effective_sandbox, "workspace-write")
 

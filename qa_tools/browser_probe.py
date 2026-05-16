@@ -217,52 +217,60 @@ def main() -> None:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page(viewport=_parse_viewport(args.viewport))
-            page.on(
-                "console",
-                lambda msg: console_messages.append({"type": msg.type, "text": msg.text}),
+            profile_dir = root / "scratch" / f"chrome-profile-{name}"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=True,
+                viewport=_parse_viewport(args.viewport),
             )
-            page.goto(target, wait_until=args.wait_until, timeout=max(1000, args.timeout_ms))
-            if args.wait_ms > 0:
-                page.wait_for_timeout(args.wait_ms)
-            body_text = page.locator("body").inner_text(timeout=max(1000, args.timeout_ms))
-            for expected in args.expect_text:
-                if expected not in body_text:
-                    findings.append(f"Missing expected text: {expected}")
-            for selector in args.expect_selector:
-                try:
-                    page.locator(selector).first.wait_for(state="visible", timeout=max(1000, args.timeout_ms))
-                except PlaywrightTimeoutError:
-                    findings.append(f"Expected selector was not visible: {selector}")
-            for index, action in enumerate(actions, start=1):
-                try:
-                    action_result = _run_action(
-                        page,
-                        action,
-                        root=root,
-                        base_name=name,
-                        index=index,
-                        timeout_ms=max(1000, args.timeout_ms),
-                    )
-                    if action_result.get("screenshot_path"):
-                        screenshots.append(str(action_result["screenshot_path"]))
-                    action_results.append(action_result)
-                except Exception as exc:
-                    action_result = {
-                        "index": index,
-                        "action": str(action.get("action") or ""),
-                        "name": str(action.get("name") or f"{name}_{index:02d}"),
-                        "status": "FAIL",
-                        "error": str(exc),
-                    }
-                    action_results.append(action_result)
-                    if not bool(action.get("optional")):
-                        findings.append(f"Action {index} failed: {exc}")
-            if not args.no_final_screenshot:
-                page.screenshot(path=screenshot_path, full_page=True)
-                screenshots.append(rel(screenshot_path))
-            browser.close()
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.on(
+                    "console",
+                    lambda msg: console_messages.append({"type": msg.type, "text": msg.text}),
+                )
+                page.goto(target, wait_until=args.wait_until, timeout=max(1000, args.timeout_ms))
+                if args.wait_ms > 0:
+                    page.wait_for_timeout(args.wait_ms)
+                body_text = page.locator("body").inner_text(timeout=max(1000, args.timeout_ms))
+                for expected in args.expect_text:
+                    if expected not in body_text:
+                        findings.append(f"Missing expected text: {expected}")
+                for selector in args.expect_selector:
+                    try:
+                        page.locator(selector).first.wait_for(state="visible", timeout=max(1000, args.timeout_ms))
+                    except PlaywrightTimeoutError:
+                        findings.append(f"Expected selector was not visible: {selector}")
+                for index, action in enumerate(actions, start=1):
+                    try:
+                        action_result = _run_action(
+                            page,
+                            action,
+                            root=root,
+                            base_name=name,
+                            index=index,
+                            timeout_ms=max(1000, args.timeout_ms),
+                        )
+                        if action_result.get("screenshot_path"):
+                            screenshots.append(str(action_result["screenshot_path"]))
+                        action_results.append(action_result)
+                    except Exception as exc:
+                        action_result = {
+                            "index": index,
+                            "action": str(action.get("action") or ""),
+                            "name": str(action.get("name") or f"{name}_{index:02d}"),
+                            "status": "FAIL",
+                            "error": str(exc),
+                        }
+                        action_results.append(action_result)
+                        if not bool(action.get("optional")):
+                            findings.append(f"Action {index} failed: {exc}")
+                if not args.no_final_screenshot:
+                    page.screenshot(path=screenshot_path, full_page=True)
+                    screenshots.append(rel(screenshot_path))
+            finally:
+                context.close()
     except ImportError as exc:
         status = "UNSUPPORTED"
         findings.append(f"Playwright is unavailable: {exc}")

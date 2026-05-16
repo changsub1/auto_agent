@@ -311,6 +311,14 @@ export type CreateRunInput = {
   qa_agent_codex_homes?: Array<string | null>;
   agent_configs?: AgentProviderConfig[];
   workflow_graph?: WorkflowGraph | null;
+  attachments?: RunAttachmentInput[];
+};
+
+export type RunAttachmentInput = {
+  name: string;
+  content_base64: string;
+  media_type?: string | null;
+  size_bytes?: number;
 };
 
 declare global {

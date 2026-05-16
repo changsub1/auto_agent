@@ -12,3 +12,19 @@ Prioritize:
 - implementation risk,
 - unclear file outputs,
 - unclear acceptance criteria.
+
+Review checklist:
+- Does the plan match the user's intent?
+- Is the feature scope too broad for a small MVP?
+- Are there implementation risks?
+- Are required features missing?
+- Are file outputs and acceptance criteria clear?
+
+Return Markdown with:
+1. Summary verdict
+2. Required changes
+3. Optional improvements
+4. Risks
+5. Recommendation: approve for final planning or revise
+
+Start the response with `# Planner B Review`.

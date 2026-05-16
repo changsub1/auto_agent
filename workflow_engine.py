@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any, Callable
 
 from codex_runner import CodexProcessHandle
 from local_dashboard_runner import (
     LocalRunConfig,
+    build_single_code_assignment,
     make_agentic_qa_baseline_result,
     run_contract_stage_async,
     run_code_agents_stage_async,
@@ -23,6 +25,7 @@ from local_dashboard_runner import (
     run_single_code_stage_async,
     run_targeted_fix_stage_async,
 )
+from qa import QAResult
 from routing import RoutingDecision
 from state_store import StateStore
 from workspace_manager import create_logs_dir
@@ -42,7 +45,7 @@ class WorkflowEngine:
             store.append_event("worker_skipped", "system", "Planning skipped because run is cancelled")
             return
 
-        config = local_config_from_state(store.load())
+        config = local_config_from_state(store.load(), run_dir=run_dir)
         logs_dir = create_logs_dir(run_dir)
         store.set_active_step(stage="planning", agent_id="planner_a", interruptible=True)
         try:
@@ -75,7 +78,7 @@ class WorkflowEngine:
             store.append_event("worker_skipped", "system", "Planning skipped because run is cancelled")
             return
 
-        config = local_config_from_state(store.load())
+        config = local_config_from_state(store.load(), run_dir=run_dir)
         logs_dir = create_logs_dir(run_dir)
 
         def register_process(agent_id: str, handle: CodexProcessHandle) -> None:
@@ -120,7 +123,7 @@ class WorkflowEngine:
             return
 
         state = store.load()
-        config = local_config_from_state(state)
+        config = local_config_from_state(state, run_dir=run_dir)
         logs_dir = create_logs_dir(run_dir)
         plan_artifacts = _load_plan_artifacts(run_dir, state)
         route = _route_from_state(state)
@@ -466,6 +469,115 @@ class WorkflowEngine:
             },
         )
 
+    async def run_qa_fix_async(
+        self,
+        run_id: str,
+        *,
+        feedback: str | None = None,
+        process_started: Callable[[str, str, CodexProcessHandle], None] | None = None,
+    ) -> None:
+        run_dir = self._run_dir(run_id)
+        store = StateStore(run_dir)
+        if _is_cancelled(store.load()):
+            store.append_event("worker_skipped", "system", "QA fix skipped because run is cancelled")
+            return
+
+        state = store.load()
+        config = local_config_from_state(state, run_dir=run_dir)
+        logs_dir = create_logs_dir(run_dir)
+        plan_artifacts = _load_plan_artifacts(run_dir, state)
+        route = _route_from_state(state)
+        manual_graph = _manual_graph_from_state(state)
+        if manual_graph is not None:
+            route = _route_from_manual_graph(manual_graph, route)
+            config = _config_from_manual_graph(config, manual_graph)
+        if route.uses_integrator or route.code_agent_count != 1:
+            raise ValueError("Operator QA fix retry currently supports single-code routes only.")
+
+        generated_app_dir = run_dir / "generated_app"
+        if not generated_app_dir.exists() or not generated_app_dir.is_dir():
+            raise FileNotFoundError("Generated app artifact is missing; cannot run QA fix.")
+        feedback_text = feedback or _latest_approval_feedback(state, action="qa_fix_requested") or "(no QA fix feedback provided)"
+        next_attempt = _next_qa_attempt_index(run_dir)
+        qa_feedback = _operator_qa_feedback_result(
+            run_dir,
+            generated_app_dir,
+            feedback_text,
+            attempt_index=next_attempt,
+        )
+        assignment = build_single_code_assignment(config, generated_app_dir)
+
+        def register(stage: str, agent_id: str, handle: CodexProcessHandle) -> None:
+            store.set_active_step(stage=stage, agent_id=agent_id, pid=handle.pid, interruptible=True)
+            if process_started is not None:
+                process_started(stage, agent_id, handle)
+
+        try:
+            store.append_event(
+                "qa_fix_started",
+                "system",
+                "Operator QA fix started",
+                {"attempt_index": next_attempt, "target": assignment.agent_id},
+            )
+            store.set_active_step(stage="fix", agent_id=assignment.agent_id, interruptible=True)
+            await run_single_code_fix_stage_async(
+                run_dir,
+                logs_dir,
+                store,
+                config,
+                plan_artifacts["final_plan"],
+                route,
+                assignment,
+                qa_feedback,
+                iteration=next_attempt,
+                process_started=lambda agent_id, handle: register("fix", agent_id, handle),
+            )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            if route.uses_llm_qa:
+                store.set_active_step(stage="llm_qa", agent_id="qa_1", interruptible=True)
+                qa_result = await run_llm_qa_stage_async(
+                    run_dir,
+                    logs_dir,
+                    store,
+                    config,
+                    run_dir / "contract",
+                    generated_app_dir,
+                    make_agentic_qa_baseline_result(run_dir, generated_app_dir, attempt_index=next_attempt),
+                    attempt_index=next_attempt,
+                    process_started=lambda agent_id, handle: register("llm_qa", agent_id, handle),
+                )
+            else:
+                store.set_active_step(stage="mechanical_qa", agent_id="mechanical_qa", interruptible=False)
+                qa_result = await asyncio.to_thread(
+                    run_mechanical_qa_stage,
+                    run_dir,
+                    store,
+                    generated_app_dir,
+                    attempt_name=f"operator-requested mechanical QA after fix {next_attempt}",
+                    attempt_index=next_attempt,
+                )
+            if _control_action(store.load()) == "cancel":
+                store.set_status("cancelled")
+                return
+
+            store.clear_control_action()
+            store.set_status("awaiting_qa_approval")
+            store.append_event(
+                "worker_checkpoint",
+                "system",
+                "Operator QA fix and QA completed",
+                {
+                    "stage": "llm_qa" if route.uses_llm_qa else "mechanical_qa",
+                    "qa_status": "PASS" if qa_result.ok else "FAIL",
+                    "attempt_index": next_attempt,
+                },
+            )
+        finally:
+            store.clear_active_step()
+
     def mark_development_queued(self, run_id: str) -> None:
         run_dir = self._run_dir(run_id)
         store = StateStore(run_dir)
@@ -502,7 +614,7 @@ class WorkflowEngine:
         return run_dir
 
 
-def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
+def local_config_from_state(state: dict[str, Any], *, run_dir: Path | None = None) -> LocalRunConfig:
     dashboard_config = state.get("dashboard_config") if isinstance(state.get("dashboard_config"), dict) else {}
     homes = dashboard_config.get("codex_homes") if isinstance(dashboard_config.get("codex_homes"), dict) else {}
     routing = state.get("routing") if isinstance(state.get("routing"), dict) else {}
@@ -529,7 +641,7 @@ def local_config_from_state(state: dict[str, Any]) -> LocalRunConfig:
         model=_optional_str(dashboard_config.get("model")),
         reasoning_effort=_optional_str(dashboard_config.get("reasoning_effort")),
         agent_configs=_agent_configs(dashboard_config.get("agent_configs")),
-        prompt_overrides=_prompt_overrides(dashboard_config.get("prompt_overrides")),
+        prompt_overrides=_prompt_overrides_from_state(dashboard_config, run_dir=run_dir),
         max_fix_iterations=_int_value(dashboard_config.get("max_fix_iterations"), 1),
         timeout_seconds=_int_value(dashboard_config.get("timeout_seconds"), 900),
     )
@@ -733,6 +845,77 @@ def _read_first_existing(run_dir: Path, relative_paths: list[str | None]) -> str
     return ""
 
 
+def _latest_approval_feedback(state: dict[str, Any], *, action: str) -> str:
+    history = state.get("approval_history")
+    if not isinstance(history, list):
+        return ""
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        if item.get("action") != action:
+            continue
+        feedback = str(item.get("feedback") or "").strip()
+        if feedback:
+            return feedback
+    return ""
+
+
+def _next_qa_attempt_index(run_dir: Path) -> int:
+    qa_dir = Path(run_dir) / "qa"
+    if not qa_dir.exists():
+        return 1
+    indexes: list[int] = []
+    for path in qa_dir.glob("attempt_*"):
+        if not path.is_dir():
+            continue
+        try:
+            indexes.append(int(path.name.split("_", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return (max(indexes) + 1) if indexes else 1
+
+
+def _operator_qa_feedback_result(
+    run_dir: Path,
+    generated_app_dir: Path,
+    feedback: str,
+    *,
+    attempt_index: int,
+) -> QAResult:
+    report_path = Path(run_dir) / "qa" / f"attempt_{attempt_index:02d}" / "operator_qa_fix_feedback.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = "\n".join(
+        [
+            "# Operator QA Fix Feedback",
+            "",
+            "The operator inspected the generated app and requested a fix after QA.",
+            "",
+            f"- Attempt: {attempt_index}",
+            f"- Generated app: `{generated_app_dir}`",
+            "- Status: FAIL",
+            "",
+            "## Feedback",
+            "",
+            feedback.strip() or "(no feedback provided)",
+            "",
+        ]
+    )
+    report_path.write_text(report, encoding="utf-8", errors="replace")
+    return QAResult(
+        ok=False,
+        checked_files=[],
+        error_log=feedback,
+        report_path=report_path,
+        report_markdown=report,
+        screenshots=[],
+        artifact_paths=[report_path],
+        executable_status="OPERATOR_REQUESTED_FIX",
+        executable_app_type="operator_review",
+        affected_paths=["."],
+        suspected_owners=["code_1"],
+    )
+
+
 def _optional_str(value: Any) -> str | None:
     if value in {None, ""}:
         return None
@@ -759,6 +942,21 @@ def _agent_configs(value: Any) -> dict[str, dict[str, object]]:
         if isinstance(agent_id, str) and isinstance(config, dict):
             result[agent_id] = dict(config)
     return result
+
+
+def _prompt_overrides_from_state(dashboard_config: dict[str, Any], *, run_dir: Path | None) -> dict[str, dict[str, str]]:
+    settings_path = _optional_str(dashboard_config.get("prompt_settings_path"))
+    if run_dir is not None and settings_path:
+        path = (run_dir / settings_path).resolve()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            loaded = _prompt_overrides(payload.get("overrides"))
+            if loaded:
+                return loaded
+    return _prompt_overrides(dashboard_config.get("prompt_overrides"))
 
 
 def _prompt_overrides(value: Any) -> dict[str, dict[str, str]]:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Boxes,
@@ -30,6 +30,7 @@ import {
   LocalAppSettings,
   ProviderCliStatus,
   ProviderModelCatalog,
+  RunAttachmentInput,
   RunSummary,
   RuntimeHealthSnapshot,
   RuntimeUsageSnapshot,
@@ -90,7 +91,19 @@ type StartRunOptions = {
   codexHome?: string | null;
   agentConfigs?: AgentProviderConfig[];
   workflowGraph?: WorkflowGraph | null;
+  attachments?: RunAttachmentInput[];
 };
+
+type ComposerAttachment = {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  mediaType: string;
+};
+
+const MAX_ATTACHMENT_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES = 80 * 1024 * 1024;
 
 type ManualStageId = "planning" | "approval_plan" | "contract" | "scaffold" | "code" | "integration" | "qa" | "approval_qa";
 
@@ -908,6 +921,31 @@ function formatResetAt(value?: string | null) {
   return `reset ${date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
 }
 
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("Failed to read attachment."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function ResourceSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-2">
@@ -1206,6 +1244,7 @@ export function AgentRosterPage({
 }) {
   const [runMode, setRunMode] = useState(config?.defaults.routing_mode || "balanced");
   const [prompt, setPrompt] = useState("");
+  const [attachedFiles, setAttachedFiles] = useState<ComposerAttachment[]>([]);
   const [customAgents, setCustomAgents] = useState<Agent[]>([]);
   const [disabledAgentIds, setDisabledAgentIds] = useState<Set<string>>(() => new Set());
   const [resourcesOpen, setResourcesOpen] = useState(false);
@@ -1232,6 +1271,7 @@ export function AgentRosterPage({
   const [promptError, setPromptError] = useState<string | null>(null);
   const [promptTab, setPromptTab] = useState<"skill" | "system" | "preview">("skill");
   const [promptPanelWidth, setPromptPanelWidth] = useState(52);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const accountOptions = useMemo(() => codexAccountOptions(config), [config]);
   const selectedAccountLabel = accountLabelForValue(accountOptions, selectedAccountHome);
   const modelOptions = codexModels?.models || [];
@@ -1438,6 +1478,75 @@ export function AgentRosterPage({
       cancelled = true;
     };
   }, [promptPanelAgentId]);
+
+  function handleAttachmentSelect(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const incoming = Array.from(files);
+    setAttachedFiles((current) => {
+      const next = [...current];
+      const existing = new Set(current.map((item) => `${item.name}:${item.size}:${item.file.lastModified}`));
+      let totalSize = current.reduce((sum, item) => sum + item.size, 0);
+      const rejected: string[] = [];
+      for (const file of incoming) {
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        if (existing.has(key)) continue;
+        if (file.size > MAX_ATTACHMENT_FILE_BYTES) {
+          rejected.push(`${file.name} (${formatBytes(file.size)})`);
+          continue;
+        }
+        if (totalSize + file.size > MAX_ATTACHMENT_TOTAL_BYTES) {
+          rejected.push(`${file.name} (${formatBytes(file.size)})`);
+          continue;
+        }
+        existing.add(key);
+        totalSize += file.size;
+        next.push({
+          id: `${key}:${globalThis.crypto?.randomUUID?.() || Date.now()}`,
+          file,
+          name: file.name,
+          size: file.size,
+          mediaType: file.type || "application/octet-stream",
+        });
+      }
+      if (rejected.length > 0) {
+        setSettingsMessage(
+          t(
+            `첨부 크기 제한으로 제외됨: ${rejected.join(", ")}`,
+            `Skipped by attachment size limit: ${rejected.join(", ")}`,
+          ),
+        );
+      }
+      return next;
+    });
+  }
+
+  async function buildAttachmentPayloads(): Promise<RunAttachmentInput[]> {
+    return Promise.all(
+      attachedFiles.map(async (attachment) => ({
+        name: attachment.name,
+        media_type: attachment.mediaType,
+        size_bytes: attachment.size,
+        content_base64: await fileToBase64(attachment.file),
+      })),
+    );
+  }
+
+  async function handleStartRunClick() {
+    try {
+      const attachments = await buildAttachmentPayloads();
+      onStartRun(prompt, runMode, {
+        ...(runMode === "manual" ? manualCounts : {}),
+        model: selectedModel || config?.defaults.model || null,
+        reasoningEffort: selectedReasoning || config?.defaults.reasoning_effort || null,
+        codexHome: selectedAccountHome || null,
+        agentConfigs,
+        workflowGraph: runMode === "manual" ? manualGraph.graph : null,
+        attachments,
+      });
+    } catch (err) {
+      setSettingsMessage(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   function updateAgentConfig(agent: Agent, patch: Partial<AgentProviderConfig>) {
     setAgentOverrides((current) => ({
@@ -1920,9 +2029,47 @@ export function AgentRosterPage({
               className="w-full resize-none px-3 py-2.5 bg-transparent outline-none text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500"
               style={{ fontSize: 13 }}
             />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                handleAttachmentSelect(event.target.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            {attachedFiles.length > 0 && (
+              <div className="px-3 pb-2 flex flex-wrap gap-1.5">
+                {attachedFiles.map((attachment) => (
+                  <span
+                    key={attachment.id}
+                    className="inline-flex max-w-full items-center gap-1 rounded-md border border-indigo-100 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-1 text-indigo-800 dark:text-indigo-200"
+                    style={{ fontSize: 11 }}
+                    title={`${attachment.name} · ${formatBytes(attachment.size)}`}
+                  >
+                    <FileText className="size-3 shrink-0" />
+                    <span className="max-w-48 truncate">{attachment.name}</span>
+                    <span className="text-indigo-500 dark:text-indigo-400">{formatBytes(attachment.size)}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAttachedFiles((current) => current.filter((item) => item.id !== attachment.id))}
+                      className="ml-0.5 rounded hover:bg-indigo-100 dark:hover:bg-indigo-900 p-0.5"
+                      aria-label={t("첨부 제거", "Remove attachment")}
+                    >
+                      <Trash2 className="size-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="flex items-center justify-between px-2 py-1.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/60 rounded-b-lg">
               <div className="flex items-center gap-1 min-w-0">
-                <ToolButton icon={<Paperclip className="size-3.5" />} label={t("첨부", "Attach")} />
+                <ToolButton
+                  icon={<Paperclip className="size-3.5" />}
+                  label={t("첨부", "Attach")}
+                  onClick={() => fileInputRef.current?.click()}
+                />
                 <ToolButton icon={<FileText className="size-3.5" />} label={t("스킬 파일", "Skill file")} />
                 <ToolButton icon={<RotateCw className="size-3.5" />} label={t("세션 이어가기", "Continue session")} />
                 <span className="ml-2 font-mono text-slate-400 dark:text-slate-500 truncate" style={{ fontSize: 10 }}>
@@ -1938,16 +2085,7 @@ export function AgentRosterPage({
                   <Save className="size-3.5" /> {t("프리셋 저장", "Save Preset")}
                 </button>
                 <button
-                  onClick={() =>
-                    onStartRun(prompt, runMode, {
-                      ...(runMode === "manual" ? manualCounts : {}),
-                      model: selectedModel || config?.defaults.model || null,
-                      reasoningEffort: selectedReasoning || config?.defaults.reasoning_effort || null,
-                      codexHome: selectedAccountHome || null,
-                      agentConfigs,
-                      workflowGraph: runMode === "manual" ? manualGraph.graph : null,
-                    })
-                  }
+                  onClick={handleStartRunClick}
                   disabled={loading || !prompt.trim() || (runMode === "manual" && graphWarnings.length > 0)}
                   className="px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 inline-flex items-center gap-1.5 shadow-[0_1px_0_rgba(79,70,229,0.4),0_2px_6px_rgba(79,70,229,0.25)]"
                   style={{ fontSize: 12 }}
@@ -2052,9 +2190,14 @@ function SelectField({
   );
 }
 
-function ToolButton({ icon, label }: { icon: ReactNode; label: string }) {
+function ToolButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick?: () => void }) {
   return (
-    <button className="px-2 py-1 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-500" style={{ fontSize: 12 }}>
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-2 py-1 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-500"
+      style={{ fontSize: 12 }}
+    >
       {icon}
       <span>{label}</span>
     </button>

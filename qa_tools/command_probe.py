@@ -14,6 +14,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds.")
     parser.add_argument("--purpose", default="Local QA command probe.", help="Why this command is being run.")
     parser.add_argument("--fail-on-nonzero", action="store_true", help="Return the command exit code when non-zero.")
+    parser.add_argument("--max-output-chars", type=int, default=20000, help="Maximum stdout/stderr chars to save.")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Command after --, for example: -- python app.py --self-test")
     args = parser.parse_args()
 
@@ -57,8 +58,10 @@ def main() -> None:
     except OSError as exc:
         stderr = str(exc)
 
-    write_text(stdout_path, stdout)
-    write_text(stderr_path, stderr)
+    stdout_preview, stdout_truncated = _truncate_output(stdout, max_chars=max(0, args.max_output_chars))
+    stderr_preview, stderr_truncated = _truncate_output(stderr, max_chars=max(0, args.max_output_chars))
+    write_text(stdout_path, stdout_preview)
+    write_text(stderr_path, stderr_preview)
     result = {
         "tool": "command_probe",
         "name": name,
@@ -70,12 +73,26 @@ def main() -> None:
         "timed_out": timed_out,
         "stdout_path": rel(stdout_path),
         "stderr_path": rel(stderr_path),
+        "stdout_chars": len(stdout),
+        "stderr_chars": len(stderr),
+        "max_output_chars": max(0, args.max_output_chars),
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
     }
     write_json(result_path, result)
     append_command_log({**result, "result_path": rel(result_path)})
 
     tool_exit = exit_code if args.fail_on_nonzero and exit_code != 0 else 0
     finish({**result, "result_path": rel(result_path)}, exit_code=tool_exit)
+
+
+def _truncate_output(text: str, *, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", bool(text)
+    if len(text) <= max_chars:
+        return text, False
+    omitted = len(text) - max_chars
+    return text[:max_chars].rstrip() + f"\n[truncated {omitted} chars]\n", True
 
 
 if __name__ == "__main__":

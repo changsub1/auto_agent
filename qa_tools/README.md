@@ -29,6 +29,23 @@ Rules:
   consistently.
 - Desktop GUI apps should be tested through `--self-test`, unit tests, imports,
   or CLI smoke checks unless a bounded GUI test hook is explicitly provided.
+- Use `file_probe` before opening generated files directly. It records file
+  size, stores only a bounded preview, and can search large files without
+  loading or printing the whole file.
+- Treat files over 128 KB as large. Use `--contains`, `--line-start`,
+  `--line-count`, and `--max-preview-chars` instead of dumping full contents.
+- Use `command_probe --max-output-chars` for commands that may print large
+  logs. The result JSON records whether stdout or stderr was truncated.
+- Avoid dependency/build/cache folders unless directly relevant:
+  `node_modules`, `.venv`, `dist`, `build`, `.next`, `.git`, `__pycache__`.
+
+Large file example:
+
+```powershell
+qa_tools\file_probe.cmd --name bundle-check --path app/dist/index.js --contains "createRoot" --max-preview-chars 1200
+qa_tools\file_probe.cmd --name focused-lines --path app/src/main.js --line-start 40 --line-count 80
+qa_tools\command_probe.cmd --name tests --cwd app --max-output-chars 12000 -- npm test
+```
 
 ## Browser Actions
 

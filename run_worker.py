@@ -12,7 +12,7 @@ from state_store import StateStore
 from workflow_engine import WorkflowEngine
 
 
-RunJobKind = Literal["start_planning", "continue_after_plan_approval", "revise_plan", "cancel"]
+RunJobKind = Literal["start_planning", "continue_after_plan_approval", "revise_plan", "qa_fix", "cancel"]
 
 
 @dataclass(frozen=True)
@@ -188,6 +188,9 @@ class RunWorker:
         if job.kind == "continue_after_plan_approval":
             await self._run_development_job(job)
             return
+        if job.kind == "qa_fix":
+            await self._run_qa_fix_job(job)
+            return
         if job.kind == "cancel":
             await self.cancel_active_process(job.run_id, job=job)
             await asyncio.to_thread(
@@ -224,6 +227,23 @@ class RunWorker:
 
         await run_development_async(
             job.run_id,
+            process_started=lambda stage, agent_id, handle: self.register_process(
+                job.run_id,
+                handle,
+                stage=stage,
+                agent_id=agent_id,
+            ),
+        )
+
+    async def _run_qa_fix_job(self, job: RunJob) -> None:
+        run_qa_fix_async = getattr(self.engine, "run_qa_fix_async", None)
+        if run_qa_fix_async is None:
+            await self._run_development_job(job)
+            return
+
+        await run_qa_fix_async(
+            job.run_id,
+            feedback=job.feedback or None,
             process_started=lambda stage, agent_id, handle: self.register_process(
                 job.run_id,
                 handle,

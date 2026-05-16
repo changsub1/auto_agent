@@ -212,29 +212,31 @@ def run_codex_result(
     effective_approval = _parse_header_value(stderr, "approval")
     effective_sandbox = _parse_header_value(stderr, "sandbox")
     _write_log(logs_dir, f"{call_id}_stdout.txt", stdout)
-    _write_log(logs_dir, f"{call_id}_stderr.txt", stderr)
-    _write_log(
-        logs_dir,
-        f"{call_id}_meta.txt",
-        _meta_text(
-            workdir=workdir,
-            codex_home=codex_home,
-            returncode=result.returncode,
-            timeout=timeout,
-            codex_executable=codex_executable,
-            command=command,
-            resumed_session_id=session_id,
-            parsed_session_id=parsed_session_id,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            image_paths=image_paths,
-            requested_sandbox=sandbox,
-            effective_approval=effective_approval,
-            effective_sandbox=effective_sandbox,
-            stripped_env_names=stripped_env_names,
-            windows_sandbox=windows_sandbox,
-        ),
-    )
+    if stderr or _debug_artifacts_enabled() or result.returncode != 0:
+        _write_log(logs_dir, f"{call_id}_stderr.txt", stderr)
+    if _debug_artifacts_enabled() or result.returncode != 0:
+        _write_log(
+            logs_dir,
+            f"{call_id}_meta.txt",
+            _meta_text(
+                workdir=workdir,
+                codex_home=codex_home,
+                returncode=result.returncode,
+                timeout=timeout,
+                codex_executable=codex_executable,
+                command=command,
+                resumed_session_id=session_id,
+                parsed_session_id=parsed_session_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                image_paths=image_paths,
+                requested_sandbox=sandbox,
+                effective_approval=effective_approval,
+                effective_sandbox=effective_sandbox,
+                stripped_env_names=stripped_env_names,
+                windows_sandbox=windows_sandbox,
+            ),
+        )
 
     if result.returncode != 0:
         message = (
@@ -382,28 +384,32 @@ async def run_codex_result_async(
     parsed_session_id = _parse_session_id(stderr) or session_id
     effective_approval = _parse_header_value(stderr, "approval")
     effective_sandbox = _parse_header_value(stderr, "sandbox")
-    _write_log(
-        logs_dir,
-        f"{call_id}_meta.txt",
-        _meta_text(
-            workdir=workdir,
-            codex_home=codex_home,
-            returncode=process.returncode,
-            timeout=timeout,
-            codex_executable=codex_executable,
-            command=command,
-            resumed_session_id=session_id,
-            parsed_session_id=parsed_session_id,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            image_paths=image_paths,
-            requested_sandbox=sandbox,
-            effective_approval=effective_approval,
-            effective_sandbox=effective_sandbox,
-            stripped_env_names=stripped_env_names,
-            windows_sandbox=windows_sandbox,
-        ),
-    )
+    if stderr_path is not None and not stderr and not _debug_artifacts_enabled() and process.returncode == 0:
+        with suppress(OSError):
+            stderr_path.unlink()
+    if _debug_artifacts_enabled() or process.returncode != 0:
+        _write_log(
+            logs_dir,
+            f"{call_id}_meta.txt",
+            _meta_text(
+                workdir=workdir,
+                codex_home=codex_home,
+                returncode=process.returncode,
+                timeout=timeout,
+                codex_executable=codex_executable,
+                command=command,
+                resumed_session_id=session_id,
+                parsed_session_id=parsed_session_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                image_paths=image_paths,
+                requested_sandbox=sandbox,
+                effective_approval=effective_approval,
+                effective_sandbox=effective_sandbox,
+                stripped_env_names=stripped_env_names,
+                windows_sandbox=windows_sandbox,
+            ),
+        )
 
     if process.returncode != 0:
         message = (
@@ -457,6 +463,11 @@ def _write_log(logs_dir: Path | None, filename: str, content: str) -> None:
     logs_dir = Path(logs_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / filename).write_text(content, encoding="utf-8")
+
+
+def _debug_artifacts_enabled() -> bool:
+    value = os.environ.get("ORCHESTRA_DEBUG_ARTIFACTS", "")
+    return value.strip().lower() in {"1", "true", "yes", "on", "debug"}
 
 
 def _prepare_stream_log(logs_dir: Path | None, filename: str) -> Path | None:

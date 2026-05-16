@@ -77,6 +77,7 @@ class StateStore:
         tmp_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+            errors="replace",
         )
         _replace_state_file(tmp_path, self.state_path)
 
@@ -236,12 +237,12 @@ class StateStore:
             "data": data or {},
         }
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8") as file:
+        with self.events_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def append_transcript(self, title: str, content: str) -> None:
         self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.transcript_path.open("a", encoding="utf-8") as file:
+        with self.transcript_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(f"\n\n## {title}\n\n")
             file.write(content.rstrip())
             file.write("\n")
@@ -249,7 +250,7 @@ class StateStore:
     def write_artifact(self, relative_path: str, content: str, *, artifact_name: str | None = None) -> Path:
         path = self.run_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        path.write_text(content.rstrip() + "\n", encoding="utf-8", errors="replace")
         if artifact_name:
             self.record_artifact(artifact_name, path)
         return path
@@ -302,10 +303,10 @@ def _read_state_file(state_path: Path) -> str:
     last_error: PermissionError | None = None
     for attempt in range(8):
         try:
-            return state_path.read_text(encoding="utf-8")
+            return state_path.read_text(encoding="utf-8", errors="replace")
         except PermissionError as exc:
             last_error = exc
             time.sleep(0.025 * (attempt + 1))
     if last_error is not None:
         raise last_error
-    return state_path.read_text(encoding="utf-8")
+    return state_path.read_text(encoding="utf-8", errors="replace")

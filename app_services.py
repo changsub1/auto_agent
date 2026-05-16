@@ -9,6 +9,10 @@ behavior.
 from __future__ import annotations
 
 import base64
+import csv
+from dataclasses import replace
+import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -16,9 +20,11 @@ import queue
 import shutil
 import subprocess
 import threading
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+import xml.etree.ElementTree as ET
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -41,6 +47,17 @@ from workspace_manager import create_logs_dir, create_run_dir
 ArtifactKind = Literal["file", "image", "log", "directory", "unknown"]
 DashboardMode = Literal["planning_only", "contract_only", "scaffold_only"]
 WorkflowStageType = Literal["planning", "approval", "contract", "scaffold", "code", "integration", "qa", "fix"]
+ATTACHMENT_MAX_FILE_BYTES = 25 * 1024 * 1024
+ATTACHMENT_MAX_TOTAL_BYTES = 80 * 1024 * 1024
+ATTACHMENT_ALLOWED_EXTENSIONS = {
+    ".csv",
+    ".tsv",
+    ".json",
+    ".xlsx",
+    ".xls",
+    ".txt",
+    ".md",
+}
 LOCAL_ENV_KEYS = {
     "CODEX_HOME",
     "PLANNER_A_CODEX_HOME",
@@ -64,6 +81,7 @@ LOCAL_ENV_KEYS = {
     "EXECUTABLE_QA_TIMEOUT_SECONDS",
     "EXECUTABLE_QA_ALLOW_LOCAL_COMMANDS",
     "CODEX_CHILD_WINDOWS_SANDBOX",
+    "ORCHESTRA_DEBUG_ARTIFACTS",
 }
 
 
@@ -106,6 +124,30 @@ class WorkflowGraph(BaseModel):
         return self
 
 
+class RunAttachmentInput(BaseModel):
+    """Base64 encoded file attached from the local desktop composer."""
+
+    name: str = Field(..., min_length=1, max_length=240)
+    content_base64: str = Field(..., min_length=1)
+    media_type: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("attachment name is required")
+        return stripped
+
+    @field_validator("media_type")
+    @classmethod
+    def _strip_media_type(cls, value: str | None) -> str | None:
+        if value in {None, ""}:
+            return None
+        return value.strip() or None
+
+
 class RunCreateRequest(BaseModel):
     """Request body for creating a local run from the app/API."""
 
@@ -129,6 +171,7 @@ class RunCreateRequest(BaseModel):
     qa_agent_codex_homes: list[str | None] | None = None
     agent_configs: list["AgentProviderConfig"] = Field(default_factory=list)
     workflow_graph: WorkflowGraph | None = None
+    attachments: list[RunAttachmentInput] = Field(default_factory=list)
 
     @field_validator("user_request")
     @classmethod
@@ -757,35 +800,48 @@ class PromptService:
             config = self._prompt_config(agent_id)
             if not (config.skill_markdown.strip() or config.system_prompt.strip()):
                 continue
-            skill_path = store.write_artifact(
-                f"prompts/{agent_id}_skill.md",
-                config.skill_markdown,
-                artifact_name=f"{agent_id}_skill_prompt",
-            )
-            system_path = store.write_artifact(
-                f"prompts/{agent_id}_system.md",
-                config.system_prompt,
-                artifact_name=f"{agent_id}_system_prompt",
-            )
             effective_path = store.write_artifact(
                 f"prompts/{agent_id}_effective_preview.md",
                 config.effective_prompt_preview,
                 artifact_name=f"{agent_id}_effective_prompt",
             )
-            snapshots[agent_id] = {
+            snapshot = {
                 "preset": config.preset or "",
                 "skill_id": config.skill_id or "",
-                "skill": store.to_relative(skill_path),
-                "system": store.to_relative(system_path),
                 "effective_preview": store.to_relative(effective_path),
+                "effective_sha256": _sha256_text(config.effective_prompt_preview),
             }
+            if _prompt_component_changed(config.system_prompt, config.default_system_prompt):
+                system_path = store.write_artifact(
+                    f"prompts/{agent_id}_system.md",
+                    config.system_prompt,
+                    artifact_name=f"{agent_id}_system_prompt",
+                )
+                snapshot["system"] = store.to_relative(system_path)
+                snapshot["system_sha256"] = _sha256_text(config.system_prompt)
+            if _prompt_component_changed(config.skill_markdown, config.default_skill_markdown):
+                skill_path = store.write_artifact(
+                    f"prompts/{agent_id}_skill.md",
+                    config.skill_markdown,
+                    artifact_name=f"{agent_id}_skill_prompt",
+                )
+                snapshot["skill"] = store.to_relative(skill_path)
+                snapshot["skill_sha256"] = _sha256_text(config.skill_markdown)
+            snapshots[agent_id] = snapshot
         settings_path = store.write_artifact(
             "prompts/prompt_settings.json",
-            _json_text(prompt_overrides),
+            _json_text(
+                {
+                    "version": 2,
+                    "overrides": prompt_overrides,
+                    "snapshots": snapshots,
+                }
+            ),
             artifact_name="prompt_settings",
         )
         state = store.load()
         state["prompt_snapshots"] = snapshots
+        state["prompt_settings_path"] = store.to_relative(settings_path)
         store.save(state)
         store.append_event(
             "prompt_snapshots_saved",
@@ -1056,24 +1112,35 @@ class RunService:
         run_dir = create_run_dir(self.project_root)
         create_logs_dir(run_dir)
         store = StateStore(run_dir)
-        store.initialize(
-            user_request=config.user_request,
-            discord={"source": "local_api"},
-            max_fix_iterations=config.max_fix_iterations,
-            code_agent_count=config.code_agent_count,
-            qa_agent_count=config.qa_agent_count,
-        )
-        self._record_local_config(store, config)
+        input_files = _write_run_input_attachments(run_dir, request.attachments)
+        input_context = _input_files_prompt_context(input_files)
+        if input_context:
+            config = replace(config, user_request=f"{config.user_request.rstrip()}\n\n{input_context}")
         route = decide_route(
-            request.user_request,
+            config.user_request,
             requested_mode=request.routing_mode,
             max_code_agent_count=config.code_agent_count,
             max_qa_agent_count=config.qa_agent_count,
         )
+        prompt_agent_ids = _run_prompt_agent_ids(route, request.workflow_graph)
+        config = replace(config, prompt_overrides=prompt_service.effective_prompt_overrides(prompt_agent_ids))
+        store.initialize(
+            user_request=config.user_request,
+            discord={"source": "local_api"},
+            max_fix_iterations=config.max_fix_iterations,
+            code_agent_count=route.code_agent_count,
+            qa_agent_count=route.qa_agent_count,
+        )
+        self._record_input_files(store, input_files, original_user_request=request.user_request)
         self._record_route(store, route)
         if request.workflow_graph is not None:
             self._record_workflow_graph(store, request.workflow_graph)
-        prompt_service.record_run_snapshots(store, _run_prompt_agent_ids(route, request.workflow_graph))
+        prompt_service.record_run_snapshots(store, prompt_agent_ids)
+        self._record_local_config(
+            store,
+            config,
+            prompt_settings_path="prompts/prompt_settings.json",
+        )
         store.set_status("planning_queued")
         return self.get_run(run_dir.name)
 
@@ -1159,11 +1226,24 @@ class RunService:
 
     def request_qa_fix(self, run_id: str, action: OperatorActionRequest) -> RunDetail:
         store = StateStore(self._run_dir(run_id))
-        _require_status(store, run_id, {"awaiting_qa_approval"}, "waiting for QA review")
+        _require_status(store, run_id, {"awaiting_qa_approval", "qa_fix_requested"}, "waiting for QA review or QA fix retry")
         store.add_approval(action="qa_fix_requested", user_id=action.user_id, feedback=action.feedback)
         store.append_transcript("Local QA Fix Feedback", action.feedback or "(no feedback)")
         store.set_status("qa_fix_requested")
         return self.get_run(run_id)
+
+    async def request_qa_fix_and_enqueue(self, run_id: str, action: OperatorActionRequest) -> RunDetail:
+        detail = self.request_qa_fix(run_id, action)
+        if self.worker:
+            await self.worker.enqueue(
+                RunJob(
+                    run_id=run_id,
+                    kind="qa_fix",
+                    feedback=action.feedback,
+                    requested_by=action.user_id,
+                )
+            )
+        return detail
 
     def _local_config_from_request(self, request: RunCreateRequest, *, prompt_service: PromptService | None = None) -> LocalRunConfig:
         defaults = LocalRunConfig.from_env()
@@ -1215,6 +1295,35 @@ class RunService:
         route_path = store.write_artifact("route.json", _json_text(payload), artifact_name="route")
         store.append_event("routing_decision", "system", f"Selected {route.mode} route", {"path": store.to_relative(route_path), **payload})
 
+    def _record_input_files(self, store: StateStore, input_files: list[dict[str, Any]], *, original_user_request: str) -> None:
+        if not input_files:
+            return
+        manifest_path = store.run_dir / "inputs" / "input_manifest.json"
+        state = store.load()
+        state["original_user_request"] = original_user_request
+        state["input_files"] = input_files
+        state["input_manifest_path"] = store.to_relative(manifest_path)
+        state.setdefault("artifacts", {})["input_manifest"] = store.to_relative(manifest_path)
+        store.save(state)
+        store.append_event(
+            "input_files_saved",
+            "system",
+            f"Input files saved ({len(input_files)})",
+            {
+                "path": store.to_relative(manifest_path),
+                "files": [
+                    {
+                        "name": entry["name"],
+                        "path": entry["path"],
+                        "size_bytes": entry["size_bytes"],
+                        "media_type": entry["media_type"],
+                    }
+                    for entry in input_files
+                ],
+            },
+        )
+        store.append_transcript("Input Files", _input_files_transcript(input_files))
+
     def _record_workflow_graph(self, store: StateStore, graph: WorkflowGraph) -> None:
         payload = graph.model_dump()
         workflow = {
@@ -1232,7 +1341,13 @@ class RunService:
             {"path": store.to_relative(graph_path), **workflow},
         )
 
-    def _record_local_config(self, store: StateStore, config: LocalRunConfig) -> None:
+    def _record_local_config(
+        self,
+        store: StateStore,
+        config: LocalRunConfig,
+        *,
+        prompt_settings_path: str | None = None,
+    ) -> None:
         payload = {
             "source": "local_api",
             "run_mode": config.run_mode,
@@ -1254,7 +1369,8 @@ class RunService:
                 "qa_agents": config.qa_agent_codex_homes,
             },
             "agent_configs": config.agent_configs,
-            "prompt_overrides": config.prompt_overrides,
+            "prompt_overrides": _prompt_override_summary(config.prompt_overrides),
+            "prompt_settings_path": prompt_settings_path,
         }
         state = store.load()
         state["dashboard_config"] = payload
@@ -1344,16 +1460,24 @@ class ArtifactService:
         run_dir = _safe_run_dir(self.runs_root, run_id)
         state = _read_json(run_dir / "state.json") if (run_dir / "state.json").exists() else {}
         artifacts: dict[str, ArtifactInfo] = {}
+        debug_artifacts = _env_bool("ORCHESTRA_DEBUG_ARTIFACTS", default=False)
 
         for _name, rel_path in (state.get("artifacts") or {}).items():
             if not isinstance(rel_path, str):
+                continue
+            if not debug_artifacts and _is_debug_artifact_path(rel_path):
                 continue
             path = _safe_artifact_path(run_dir, rel_path)
             if path.exists():
                 info = self._artifact_info(run_dir, path, source="state")
                 artifacts[info.path] = info
 
-        for path in self._discover_artifact_paths(run_dir):
+        discovered_paths = (
+            self._discover_artifact_paths(run_dir)
+            if debug_artifacts
+            else self._discover_slim_artifact_paths(run_dir)
+        )
+        for path in discovered_paths:
             info = self._artifact_info(run_dir, path, source="discovered")
             artifacts.setdefault(info.path, info)
 
@@ -1411,6 +1535,64 @@ class ArtifactService:
                 continue
             paths.append(root)
             paths.extend(path for path in root.rglob("*") if path.is_file())
+        return paths
+
+    def _discover_slim_artifact_paths(self, run_dir: Path) -> list[Path]:
+        paths: list[Path] = []
+        for path in [
+            run_dir / "plan.md",
+            run_dir / "route.json",
+            run_dir / "qa_report.md",
+            run_dir / "inputs" / "input_manifest.json",
+        ]:
+            if path.exists():
+                paths.append(path)
+
+        for root in [
+            run_dir / "planning",
+            run_dir / "contract",
+            run_dir / "agent_outputs",
+            run_dir / "generated_app",
+            run_dir / "integration",
+            run_dir / "prompts",
+            run_dir / "logs",
+            run_dir / "qa",
+        ]:
+            if root.exists():
+                paths.append(root)
+
+        logs_dir = run_dir / "logs"
+        if logs_dir.exists():
+            for pattern in ["*_prompt.txt", "*_stdout.txt", "*_stderr.txt"]:
+                for path in sorted(logs_dir.glob(pattern)):
+                    if path.is_file() and (not path.name.endswith("_stderr.txt") or path.stat().st_size > 0):
+                        paths.append(path)
+
+        prompts_dir = run_dir / "prompts"
+        if prompts_dir.exists():
+            paths.extend(path for path in sorted(prompts_dir.glob("*")) if path.is_file())
+
+        qa_dir = run_dir / "qa"
+        if qa_dir.exists():
+            for attempt_dir in sorted(path for path in qa_dir.glob("attempt_*") if path.is_dir()):
+                paths.extend(path for path in sorted(attempt_dir.glob("*_workspace_qa.md")) if path.is_file())
+                for workspace_dir in sorted(path for path in attempt_dir.glob("qa_workspace*") if path.is_dir()):
+                    for relative_path in [
+                        "evidence/evidence_manifest.json",
+                        "evidence/verdict.json",
+                        "evidence/qa_findings.md",
+                        "evidence/command_log.jsonl",
+                        "evidence/host_browser_evidence.json",
+                    ]:
+                        path = workspace_dir / relative_path
+                        if path.exists() and path.is_file():
+                            paths.append(path)
+                    for image_pattern in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+                        paths.extend(
+                            path
+                            for path in sorted((workspace_dir / "screenshots").glob(image_pattern))
+                            if path.is_file()
+                        )
         return paths
 
     def _artifact_info(self, run_dir: Path, path: Path, *, source: str) -> ArtifactInfo:
@@ -1573,6 +1755,415 @@ def _safe_run_dir(runs_root: Path, run_id: str) -> Path:
     if not run_dir.exists() or not run_dir.is_dir():
         raise FileNotFoundError(f"Run not found: {run_id}")
     return run_dir
+
+
+def _write_run_input_attachments(run_dir: Path, attachments: list[RunAttachmentInput]) -> list[dict[str, Any]]:
+    if not attachments:
+        return []
+    inputs_dir = run_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    total_size = 0
+    entries: list[dict[str, Any]] = []
+    for index, attachment in enumerate(attachments, start=1):
+        safe_name = _safe_attachment_filename(attachment.name, used_names, fallback=f"input_{index}")
+        suffix = Path(safe_name).suffix.lower()
+        if suffix not in ATTACHMENT_ALLOWED_EXTENSIONS:
+            allowed = ", ".join(sorted(ATTACHMENT_ALLOWED_EXTENSIONS))
+            raise ValueError(f"Unsupported attachment type for {attachment.name!r}. Allowed extensions: {allowed}")
+        try:
+            payload = base64.b64decode(_strip_base64_data_url(attachment.content_base64), validate=True)
+        except Exception as exc:  # noqa: BLE001 - validation boundary for user supplied payload.
+            raise ValueError(f"Invalid base64 payload for attachment {attachment.name!r}") from exc
+        if len(payload) > ATTACHMENT_MAX_FILE_BYTES:
+            raise ValueError(f"Attachment {attachment.name!r} exceeds the per-file limit of {ATTACHMENT_MAX_FILE_BYTES} bytes")
+        total_size += len(payload)
+        if total_size > ATTACHMENT_MAX_TOTAL_BYTES:
+            raise ValueError(f"Attachments exceed the total limit of {ATTACHMENT_MAX_TOTAL_BYTES} bytes")
+        target_path = inputs_dir / safe_name
+        target_path.write_bytes(payload)
+        media_type = attachment.media_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+        profile = _profile_input_attachment(safe_name, payload)
+        entries.append(
+            {
+                "name": safe_name,
+                "original_name": attachment.name,
+                "path": f"inputs/{safe_name}",
+                "size_bytes": len(payload),
+                "declared_size_bytes": attachment.size_bytes,
+                "media_type": media_type,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "profile": profile,
+            }
+        )
+    manifest = {
+        "version": 1,
+        "input_root": "inputs",
+        "files": entries,
+        "limits": {
+            "max_file_bytes": ATTACHMENT_MAX_FILE_BYTES,
+            "max_total_bytes": ATTACHMENT_MAX_TOTAL_BYTES,
+        },
+    }
+    (inputs_dir / "input_manifest.json").write_text(_json_text(manifest), encoding="utf-8", errors="replace")
+    return entries
+
+
+def _safe_attachment_filename(original_name: str, used_names: set[str], *, fallback: str) -> str:
+    leaf = original_name.replace("\\", "/").split("/")[-1].strip().strip(". ")
+    cleaned = "".join("_" if char in '<>:"/\\|?*' or ord(char) < 32 else char for char in leaf)
+    cleaned = cleaned.strip().strip(". ") or fallback
+    path = Path(cleaned)
+    stem = path.stem.strip() or fallback
+    suffix = path.suffix.lower()
+    candidate = f"{stem}{suffix}"
+    counter = 2
+    while candidate.lower() in used_names:
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    used_names.add(candidate.lower())
+    return candidate
+
+
+def _strip_base64_data_url(content: str) -> str:
+    text = content.strip()
+    if "," in text and text.lower().startswith("data:"):
+        return text.split(",", 1)[1].strip()
+    return text
+
+
+def _profile_input_attachment(name: str, payload: bytes) -> dict[str, Any]:
+    suffix = Path(name).suffix.lower()
+    try:
+        if suffix in {".csv", ".tsv"}:
+            return _profile_delimited_input(payload, delimiter="\t" if suffix == ".tsv" else ",")
+        if suffix == ".json":
+            return _profile_json_input(payload)
+        if suffix == ".xlsx":
+            return _profile_xlsx_input(payload)
+        if suffix == ".xls":
+            return {"type": "excel_legacy", "status": "unsupported_profile", "reason": "legacy .xls preview is not parsed"}
+    except Exception as exc:  # noqa: BLE001 - profiles must not block run creation.
+        return {"type": suffix.lstrip(".") or "unknown", "status": "profile_failed", "error": str(exc)}
+    return {"type": suffix.lstrip(".") or "unknown", "status": "not_profiled"}
+
+
+def _profile_delimited_input(payload: bytes, *, delimiter: str) -> dict[str, Any]:
+    text, encoding = _decode_preview_bytes(payload, max_bytes=1024 * 1024)
+    sample = io.StringIO(text)
+    reader = csv.reader(sample, delimiter=delimiter)
+    rows: list[list[str]] = []
+    for index, row in enumerate(reader):
+        if index >= 6:
+            break
+        rows.append([cell.strip() for cell in row[:50]])
+    header = rows[0] if rows else []
+    samples = rows[1:6] if len(rows) > 1 else []
+    return {
+        "type": "tsv" if delimiter == "\t" else "csv",
+        "status": "profiled",
+        "encoding": encoding,
+        "columns": header[:50],
+        "column_count_preview": len(header),
+        "sample_rows": samples,
+        "sample_row_count": len(samples),
+        "truncated": len(payload) > 1024 * 1024,
+    }
+
+
+def _profile_json_input(payload: bytes) -> dict[str, Any]:
+    text, encoding = _decode_preview_bytes(payload, max_bytes=512 * 1024)
+    parsed = json.loads(text)
+    if isinstance(parsed, dict):
+        keys = list(parsed.keys())[:50]
+        return {
+            "type": "json",
+            "status": "profiled",
+            "encoding": encoding,
+            "top_level": "object",
+            "keys": keys,
+            "key_count_preview": len(keys),
+        }
+    if isinstance(parsed, list):
+        first = parsed[0] if parsed else None
+        first_keys = list(first.keys())[:50] if isinstance(first, dict) else []
+        return {
+            "type": "json",
+            "status": "profiled",
+            "encoding": encoding,
+            "top_level": "array",
+            "item_count_preview": len(parsed),
+            "first_item_keys": first_keys,
+            "truncated": len(payload) > 512 * 1024,
+        }
+    return {
+        "type": "json",
+        "status": "profiled",
+        "encoding": encoding,
+        "top_level": type(parsed).__name__,
+    }
+
+
+def _decode_preview_bytes(payload: bytes, *, max_bytes: int) -> tuple[str, str]:
+    sample = payload[:max_bytes]
+    for encoding in ["utf-8-sig", "utf-8", "cp949"]:
+        try:
+            return sample.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return sample.decode("utf-8", errors="replace"), "utf-8-replace"
+
+
+def _profile_xlsx_input(payload: bytes) -> dict[str, Any]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as workbook:
+        shared_strings = _xlsx_shared_strings(workbook)
+        sheets = _xlsx_sheet_entries(workbook)
+        profiled_sheets: list[dict[str, Any]] = []
+        for sheet in sheets[:8]:
+            sheet_path = sheet.get("path", "")
+            if not sheet_path:
+                continue
+            try:
+                header, rows_preview, dimensions = _xlsx_sheet_preview(workbook, sheet_path, shared_strings)
+            except Exception as exc:  # noqa: BLE001 - keep workbook profile best effort.
+                profiled_sheets.append(
+                    {
+                        "name": sheet.get("name") or sheet_path,
+                        "path": sheet_path,
+                        "status": "profile_failed",
+                        "error": str(exc),
+                    }
+                )
+                continue
+            profiled_sheets.append(
+                {
+                    "name": sheet.get("name") or sheet_path,
+                    "path": sheet_path,
+                    "status": "profiled",
+                    "columns": header[:50],
+                    "column_count_preview": len(header),
+                    **dimensions,
+                    "sample_rows": rows_preview[:3],
+                }
+            )
+    return {
+        "type": "xlsx",
+        "status": "profiled",
+        "sheet_count": len(sheets),
+        "sheets": profiled_sheets,
+        "truncated": len(profiled_sheets) < len(sheets),
+    }
+
+
+def _xlsx_shared_strings(workbook: zipfile.ZipFile) -> list[str]:
+    try:
+        raw = workbook.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    root = ET.fromstring(raw)
+    namespace = _xml_namespace(root.tag)
+    values: list[str] = []
+    for item in root.findall(f".//{namespace}si"):
+        parts = [node.text or "" for node in item.findall(f".//{namespace}t")]
+        values.append("".join(parts))
+    return values
+
+
+def _xlsx_sheet_entries(workbook: zipfile.ZipFile) -> list[dict[str, str]]:
+    workbook_root = ET.fromstring(workbook.read("xl/workbook.xml"))
+    namespace = _xml_namespace(workbook_root.tag)
+    rels = _xlsx_workbook_relationships(workbook)
+    sheets: list[dict[str, str]] = []
+    for sheet in workbook_root.findall(f".//{namespace}sheet"):
+        name = sheet.attrib.get("name", "")
+        rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+        target = rels.get(rel_id, "")
+        if target:
+            if target.startswith("/xl/"):
+                path = target.lstrip("/")
+            elif target.startswith("xl/"):
+                path = target
+            else:
+                path = f"xl/{target.lstrip('/')}"
+        else:
+            path = ""
+        sheets.append({"name": name, "path": path})
+    return sheets
+
+
+def _xlsx_workbook_relationships(workbook: zipfile.ZipFile) -> dict[str, str]:
+    try:
+        root = ET.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
+    except KeyError:
+        return {}
+    relationships: dict[str, str] = {}
+    for rel in root:
+        rel_id = rel.attrib.get("Id", "")
+        target = rel.attrib.get("Target", "")
+        if rel_id and target:
+            relationships[rel_id] = target
+    return relationships
+
+
+def _xlsx_sheet_preview(
+    workbook: zipfile.ZipFile,
+    sheet_path: str,
+    shared_strings: list[str],
+) -> tuple[list[str], list[list[str]], dict[str, int]]:
+    root = ET.fromstring(workbook.read(sheet_path))
+    namespace = _xml_namespace(root.tag)
+    dimensions = _xlsx_dimension_estimate(root, namespace)
+    rows: list[list[str]] = []
+    for index, row in enumerate(root.findall(f".//{namespace}sheetData/{namespace}row")):
+        if index >= 4:
+            break
+        rows.append([_xlsx_cell_value(cell, namespace, shared_strings).strip() for cell in row.findall(f"{namespace}c")[:50]])
+    header = rows[0] if rows else []
+    samples = rows[1:4] if len(rows) > 1 else []
+    return header, samples, dimensions
+
+
+def _xlsx_dimension_estimate(root: ET.Element, namespace: str) -> dict[str, int]:
+    dimension = root.find(f"{namespace}dimension")
+    ref = dimension.attrib.get("ref", "") if dimension is not None else ""
+    if not ref:
+        return {}
+    end_ref = ref.split(":")[-1]
+    letters = "".join(char for char in end_ref if char.isalpha())
+    digits = "".join(char for char in end_ref if char.isdigit())
+    result: dict[str, int] = {}
+    if letters:
+        result["column_count_estimate"] = _excel_column_number(letters)
+    if digits:
+        try:
+            result["row_count_estimate"] = int(digits)
+        except ValueError:
+            pass
+    return result
+
+
+def _excel_column_number(letters: str) -> int:
+    value = 0
+    for char in letters.upper():
+        if not ("A" <= char <= "Z"):
+            continue
+        value = value * 26 + (ord(char) - ord("A") + 1)
+    return value
+
+
+def _xlsx_cell_value(cell: ET.Element, namespace: str, shared_strings: list[str]) -> str:
+    value_node = cell.find(f"{namespace}v")
+    if value_node is None or value_node.text is None:
+        inline_node = cell.find(f".//{namespace}t")
+        return inline_node.text if inline_node is not None and inline_node.text else ""
+    raw_value = value_node.text
+    if cell.attrib.get("t") == "s":
+        try:
+            return shared_strings[int(raw_value)]
+        except (ValueError, IndexError):
+            return raw_value
+    return raw_value
+
+
+def _xml_namespace(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag.split("}", 1)[0] + "}"
+    return ""
+
+
+def _input_files_prompt_context(input_files: list[dict[str, Any]]) -> str:
+    if not input_files:
+        return ""
+    lines = [
+        "# Attached Input Files",
+        "",
+        "The user attached input files for this run. Treat them as read-only source data.",
+        "They are saved under `inputs/` relative to the run root.",
+        "When working inside `generated_app/` or a code workspace, the same files are copied to local `inputs/`.",
+        "If a copied `inputs/` folder is unavailable, use the run-root path shown below.",
+        "QA workspaces also receive a local `inputs/` copy.",
+        "Use `inputs/input_manifest.json` for metadata and schema previews.",
+        "Do not paste entire large files into responses; inspect schemas, columns, samples, and summaries first.",
+        "",
+    ]
+    for entry in input_files:
+        path = str(entry["path"])
+        lines.append(
+            f"- `{path}` (or local workspace `inputs/{entry['name']}`): "
+            f"{entry['size_bytes']} bytes, {entry['media_type']}, sha256 {str(entry['sha256'])[:12]}"
+        )
+        lines.extend(_input_file_profile_prompt_lines(entry))
+    return "\n".join(lines)
+
+
+def _input_files_transcript(input_files: list[dict[str, Any]]) -> str:
+    lines = ["Attached files saved for this run:", ""]
+    for entry in input_files:
+        lines.append(f"- `{entry['path']}` ({entry['size_bytes']} bytes, {entry['media_type']})")
+        lines.extend(_input_file_profile_prompt_lines(entry, indent="  "))
+    return "\n".join(lines)
+
+
+def _input_file_profile_prompt_lines(entry: dict[str, Any], *, indent: str = "  ") -> list[str]:
+    profile = entry.get("profile")
+    if not isinstance(profile, dict):
+        return []
+    status = str(profile.get("status") or "")
+    if status != "profiled":
+        reason = profile.get("reason") or profile.get("error") or status or "not profiled"
+        return [f"{indent}- profile: {reason}"]
+    profile_type = str(profile.get("type") or "unknown")
+    lines = [f"{indent}- profile: {profile_type}"]
+    if profile_type in {"csv", "tsv"}:
+        columns = _format_preview_values(profile.get("columns"))
+        if columns:
+            lines.append(f"{indent}- columns: {columns}")
+        sample_rows = profile.get("sample_rows")
+        if isinstance(sample_rows, list) and sample_rows:
+            lines.append(f"{indent}- sample rows: {len(sample_rows)} preview row(s)")
+    elif profile_type == "json":
+        top_level = profile.get("top_level")
+        keys = _format_preview_values(profile.get("keys") or profile.get("first_item_keys"))
+        lines.append(f"{indent}- top level: {top_level}")
+        if keys:
+            lines.append(f"{indent}- keys: {keys}")
+    elif profile_type == "xlsx":
+        lines.append(f"{indent}- sheets: {profile.get('sheet_count', 0)}")
+        for sheet in profile.get("sheets", [])[:5]:
+            if not isinstance(sheet, dict):
+                continue
+            columns = _format_preview_values(sheet.get("columns"))
+            sheet_name = sheet.get("name") or sheet.get("path") or "sheet"
+            size_hint = _xlsx_sheet_size_hint(sheet)
+            if columns:
+                lines.append(f"{indent}- sheet `{sheet_name}`{size_hint} columns: {columns}")
+            else:
+                lines.append(f"{indent}- sheet `{sheet_name}`{size_hint}")
+    return lines
+
+
+def _xlsx_sheet_size_hint(sheet: dict[str, Any]) -> str:
+    rows = sheet.get("row_count_estimate")
+    columns = sheet.get("column_count_estimate")
+    if rows and columns:
+        return f" ({rows} rows x {columns} columns)"
+    if rows:
+        return f" ({rows} rows)"
+    if columns:
+        return f" ({columns} columns)"
+    return ""
+
+
+def _format_preview_values(values: object, *, limit: int = 12) -> str:
+    if not isinstance(values, list):
+        return ""
+    clean = [str(value).strip() for value in values if str(value).strip()]
+    if not clean:
+        return ""
+    rendered = ", ".join(f"`{value}`" for value in clean[:limit])
+    if len(clean) > limit:
+        rendered += ", ..."
+    return rendered
 
 
 def _require_status(store: StateStore, run_id: str, allowed: set[str], description: str) -> None:
@@ -1757,6 +2348,32 @@ def _toml_string_value(value: str) -> str:
 
 def _json_text(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _prompt_component_changed(value: str, default: str) -> bool:
+    return value.strip() != default.strip()
+
+
+def _prompt_override_summary(prompt_overrides: dict[str, dict[str, str]]) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    for agent_id, override in prompt_overrides.items():
+        skill_markdown = str(override.get("skill_markdown") or "")
+        system_prompt = str(override.get("system_prompt") or "")
+        summary[agent_id] = {
+            "preset": str(override.get("preset") or ""),
+            "skill_id": str(override.get("skill_id") or ""),
+            "has_skill_markdown": bool(skill_markdown.strip()),
+            "has_system_prompt": bool(system_prompt.strip()),
+            "skill_chars": len(skill_markdown),
+            "system_chars": len(system_prompt),
+            "skill_sha256": _sha256_text(skill_markdown) if skill_markdown.strip() else "",
+            "system_sha256": _sha256_text(system_prompt) if system_prompt.strip() else "",
+        }
+    return summary
 
 
 def _optional_str(value: Any) -> str | None:
@@ -2043,6 +2660,30 @@ def _env_bool(name: str, *, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _is_debug_artifact_path(relative_path: str) -> bool:
+    path = relative_path.replace("\\", "/").strip("/")
+    if path.startswith("logs/") and not (
+        path.endswith("_prompt.txt") or path.endswith("_stdout.txt") or path.endswith("_stderr.txt")
+    ):
+        return True
+    if path.startswith("prompts/final/"):
+        return True
+    if "/qa_workspace" in path:
+        slim_qa_suffixes = (
+            "/evidence/evidence_manifest.json",
+            "/evidence/verdict.json",
+            "/evidence/qa_findings.md",
+            "/evidence/command_log.jsonl",
+            "/evidence/host_browser_evidence.json",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+        )
+        return not any(path.endswith(suffix) for suffix in slim_qa_suffixes)
+    return False
+
+
 def _event_kind(event_type: str, actor: str) -> str:
     if event_type == "approval":
         return "approval"
@@ -2154,7 +2795,6 @@ def _request_prompt_agent_ids(*, planner_count: int, code_agent_count: int, qa_a
     if planner_count >= 3:
         ids.append("planner_c")
     ids.extend(f"code_{index}" for index in range(1, max(1, code_agent_count) + 1))
-    ids.append("integrator")
     ids.extend(f"qa_{index}" for index in range(1, max(0, qa_agent_count) + 1))
     return ids
 
@@ -2162,11 +2802,21 @@ def _request_prompt_agent_ids(*, planner_count: int, code_agent_count: int, qa_a
 def _run_prompt_agent_ids(route: RoutingDecision, graph: WorkflowGraph | None) -> list[str]:
     if graph is not None:
         return _workflow_graph_prompt_agent_ids(graph)
-    return _request_prompt_agent_ids(
-        planner_count=route.planner_count,
-        code_agent_count=route.code_agent_count,
-        qa_agent_count=route.qa_agent_count,
-    )
+    ids = ["planner_a"]
+    if route.planner_count >= 2:
+        ids.append("planner_b")
+    if route.planner_count >= 3:
+        ids.append("planner_c")
+    if route.uses_contract:
+        ids.append("architect")
+    if route.uses_scaffold:
+        ids.append("scaffold")
+    ids.extend(f"code_{index}" for index in range(1, max(1, route.code_agent_count) + 1))
+    if route.uses_integrator:
+        ids.append("integrator")
+    if route.uses_llm_qa:
+        ids.extend(f"qa_{index}" for index in range(1, max(0, route.qa_agent_count) + 1))
+    return _merge_text_values(ids)
 
 
 def _workflow_graph_prompt_agent_ids(graph: WorkflowGraph) -> list[str]:
@@ -2256,9 +2906,12 @@ def _event_details(data: dict[str, Any]) -> list[str]:
         "scenario_path",
         "error_path",
         "workspace_path",
+        "evidence_manifest_path",
         "verdict_path",
         "findings_path",
         "command_log_path",
+        "agent_output_path",
+        "scratch_cleanup_removed",
         "verdict_error",
     ]:
         if key in data and data[key] not in {None, ""}:
@@ -2271,6 +2924,7 @@ def _event_details(data: dict[str, Any]) -> list[str]:
         "affected_paths",
         "suspected_owners",
         "hard_policy_errors",
+        "scratch_cleanup_errors",
     ]:
         value = data.get(key)
         if isinstance(value, list):
@@ -2289,7 +2943,16 @@ def _event_artifacts(data: dict[str, Any]) -> list[TimelineArtifact]:
             return
         artifacts.append(TimelineArtifact(name=Path(path).name or path, path=path, type=_artifact_kind(Path(path))))
 
-    for key in ["path", "scenario_path", "error_path", "report_path", "verdict_path", "findings_path", "command_log_path"]:
+    for key in [
+        "path",
+        "scenario_path",
+        "error_path",
+        "report_path",
+        "evidence_manifest_path",
+        "verdict_path",
+        "findings_path",
+        "command_log_path",
+    ]:
         append_path(data.get(key))
     for key in ["files", "screenshots", "artifact_paths"]:
         value = data.get(key)

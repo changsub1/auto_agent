@@ -52,7 +52,7 @@ def save_text(path: Path, content: str) -> None:
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_with_trailing_newline(content), encoding="utf-8")
+    path.write_text(_with_trailing_newline(content), encoding="utf-8", errors="replace")
 
 
 def append_text(path: Path, content: str) -> None:
@@ -60,7 +60,7 @@ def append_text(path: Path, content: str) -> None:
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as file:
+    with path.open("a", encoding="utf-8", errors="replace") as file:
         file.write(_with_trailing_newline(content))
 
 
@@ -74,7 +74,7 @@ def normalize_windows_command_files(app_dir: Path) -> list[Path]:
 
         content = path.read_text(encoding="utf-8", errors="replace")
         content = content.replace("\r\n", "\n").replace("\r", "\n")
-        path.write_text(content, encoding="utf-8", newline="\r\n")
+        path.write_text(content, encoding="utf-8", errors="replace", newline="\r\n")
         normalized_files.append(path)
 
     return normalized_files

@@ -256,14 +256,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs/{run_id}/qa/request-fix", response_model=RunDetail)
-    def request_qa_fix(
+    async def request_qa_fix(
         run_id: str,
         payload: OperatorActionRequest | None = None,
     ) -> RunDetail:
         try:
-            return run_service.request_qa_fix(run_id, payload or OperatorActionRequest())
+            return await run_service.request_qa_fix_and_enqueue(run_id, payload or OperatorActionRequest())
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return app
 

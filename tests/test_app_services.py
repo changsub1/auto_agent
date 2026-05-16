@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -30,13 +31,13 @@ from app_services import (
     WorkflowGraph,
     LOCAL_ENV_KEYS,
 )
-from local_dashboard_runner import _snapshot_final_prompts_from_logs
+from local_dashboard_runner import _copy_run_inputs_to_workspace, _snapshot_final_prompts_from_logs
 from run_worker import RunWorker
 from qa import QAResult
 from prompt_templates import available_template_roles, load_agent_system_prompt, role_for_agent_id
 from skill_registry import DEFAULT_CODE_AGENT_SKILL_ID, SkillRegistry
 from state_store import StateStore
-from workflow_engine import WorkflowEngine
+from workflow_engine import WorkflowEngine, local_config_from_state
 
 
 class AppServiceTests(unittest.TestCase):
@@ -119,6 +120,67 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(detail.state["active_step"]["stage"], None)
         self.assertTrue((created_dir / "route.json").exists())
 
+    def test_create_run_saves_input_attachments_and_manifest(self) -> None:
+        service = RunService(self.project_root)
+        csv_bytes = "brand,stores\nA,10\n".encode("utf-8")
+        detail = service.create_run(
+            RunCreateRequest(
+                user_request="Build a franchise dashboard",
+                routing_mode="balanced",
+                attachments=[
+                    {
+                        "name": "../franchise.csv",
+                        "content_base64": base64.b64encode(csv_bytes).decode("ascii"),
+                        "media_type": "text/csv",
+                        "size_bytes": len(csv_bytes),
+                    }
+                ],
+            )
+        )
+        created_dir = self.project_root / "runs" / detail.run_id
+        manifest_path = created_dir / "inputs" / "input_manifest.json"
+
+        self.assertTrue((created_dir / "inputs" / "franchise.csv").exists())
+        self.assertTrue(manifest_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["files"][0]["path"], "inputs/franchise.csv")
+        self.assertEqual(manifest["files"][0]["profile"]["type"], "csv")
+        self.assertEqual(manifest["files"][0]["profile"]["columns"], ["brand", "stores"])
+        self.assertEqual(detail.state["input_files"][0]["name"], "franchise.csv")
+        self.assertEqual(detail.state["input_manifest_path"], "inputs/input_manifest.json")
+        self.assertIn("Attached Input Files", detail.state["user_request"])
+        self.assertIn("inputs/franchise.csv", detail.state["user_request"])
+        self.assertIn("local workspace `inputs/franchise.csv`", detail.state["user_request"])
+        self.assertIn("columns: `brand`, `stores`", detail.state["user_request"])
+        events = (created_dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn("input_files_saved", events)
+
+    def test_run_inputs_copy_to_agent_workspace(self) -> None:
+        service = RunService(self.project_root)
+        csv_bytes = "brand,stores\nA,10\n".encode("utf-8")
+        detail = service.create_run(
+            RunCreateRequest(
+                user_request="Build a franchise dashboard",
+                routing_mode="balanced",
+                attachments=[
+                    {
+                        "name": "franchise.csv",
+                        "content_base64": base64.b64encode(csv_bytes).decode("ascii"),
+                        "media_type": "text/csv",
+                    }
+                ],
+            )
+        )
+        run_dir = Path(detail.run_dir)
+        workspace_dir = run_dir / "generated_app"
+        workspace_dir.mkdir()
+
+        copied = _copy_run_inputs_to_workspace(run_dir, workspace_dir)
+
+        self.assertEqual(copied, workspace_dir / "inputs")
+        self.assertEqual((workspace_dir / "inputs" / "franchise.csv").read_bytes(), csv_bytes)
+        self.assertTrue((workspace_dir / "inputs" / "input_manifest.json").exists())
+
     def test_create_run_records_selected_provider_defaults(self) -> None:
         service = RunService(self.project_root)
         codex_home = str(self.project_root / "account_1")
@@ -192,9 +254,31 @@ class AppServiceTests(unittest.TestCase):
         )
         created_dir = self.project_root / "runs" / detail.run_id
 
-        self.assertIn("qa_1", detail.state["prompt_snapshots"])
+        snapshots = detail.state["prompt_snapshots"]
+        self.assertIn("planner_a", snapshots)
+        self.assertIn("planner_b", snapshots)
+        self.assertIn("code_1", snapshots)
+        self.assertIn("qa_1", snapshots)
+        self.assertNotIn("integrator", snapshots)
+        self.assertNotIn("code_2", snapshots)
+        self.assertTrue((created_dir / snapshots["qa_1"]["effective_preview"]).exists())
         self.assertTrue((created_dir / "prompts" / "qa_1_skill.md").exists())
-        self.assertEqual(detail.state["dashboard_config"]["prompt_overrides"]["qa_1"]["skill_markdown"], "Strict QA rubric")
+
+        prompt_summary = detail.state["dashboard_config"]["prompt_overrides"]["qa_1"]
+        self.assertNotIn("skill_markdown", prompt_summary)
+        self.assertNotIn("system_prompt", prompt_summary)
+        self.assertEqual(prompt_summary["skill_chars"], len("Strict QA rubric"))
+        self.assertEqual(prompt_summary["system_chars"], len("Strict QA system"))
+
+        settings_path = created_dir / detail.state["dashboard_config"]["prompt_settings_path"]
+        prompt_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(prompt_settings["version"], 2)
+        self.assertEqual(prompt_settings["overrides"]["qa_1"]["skill_markdown"], "Strict QA rubric")
+        self.assertEqual(prompt_settings["overrides"]["qa_1"]["system_prompt"], "Strict QA system")
+        self.assertNotIn("integrator", prompt_settings["overrides"])
+
+        loaded_config = local_config_from_state(detail.state, run_dir=created_dir)
+        self.assertEqual(loaded_config.prompt_overrides["qa_1"]["skill_markdown"], "Strict QA rubric")
         self.assertEqual(detail.state["routing"]["pipeline"][-1], "qa_agent")
         qa_stage = next(stage for stage in detail.state["workflow"]["stages"] if stage["id"] == "qa")
         self.assertEqual(qa_stage["agents"], ["qa_1"])
@@ -231,7 +315,8 @@ class AppServiceTests(unittest.TestCase):
         prompt_log = logs_dir / "20260512_010203_123456_planner_a_draft_prompt.txt"
         prompt_log.write_text("FINAL PROMPT BODY\n", encoding="utf-8")
 
-        added = _snapshot_final_prompts_from_logs(self.store)
+        with patch.dict(os.environ, {"ORCHESTRA_DEBUG_ARTIFACTS": "1"}):
+            added = _snapshot_final_prompts_from_logs(self.store)
 
         expected_path = "prompts/final/20260512_010203_123456_planner_a_draft_final_prompt.md"
         self.assertEqual(added, {"logs/20260512_010203_123456_planner_a_draft_prompt.txt": expected_path})
@@ -245,7 +330,8 @@ class AppServiceTests(unittest.TestCase):
             state["artifacts"]["final_prompt_20260512_010203_123456_planner_a_draft"],
             expected_path,
         )
-        self.assertEqual(_snapshot_final_prompts_from_logs(self.store), {})
+        with patch.dict(os.environ, {"ORCHESTRA_DEBUG_ARTIFACTS": "1"}):
+            self.assertEqual(_snapshot_final_prompts_from_logs(self.store), {})
 
     def test_agent_prompt_templates_load_for_default_roles(self) -> None:
         roles = set(available_template_roles(self.project_root))
@@ -258,6 +344,7 @@ class AppServiceTests(unittest.TestCase):
             "code_agent",
             "integrator",
             "qa_agent",
+            "developer",
         ]:
             self.assertIn(role, roles)
             self.assertTrue(load_agent_system_prompt(self.project_root, role=role).strip())
@@ -422,11 +509,52 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(events[-1].summary, "# Plan")
         self.assertEqual(events[-1].artifacts[0].path, "planning/03_final_plan.md")
 
+    def test_utf8_korean_state_events_transcript_and_artifacts_round_trip(self) -> None:
+        run_dir = self.project_root / "runs" / "utf8_korean"
+        run_dir.mkdir(parents=True)
+        store = StateStore(run_dir)
+        user_request = "간단한 쇼핑몰 사이트를 만들어줘. 상품은 가로 슬라이드로 보여줘."
+        store.initialize(user_request=user_request, discord={"source": "unit_test"})
+        artifact_path = store.write_artifact(
+            "qa/한글_결과.md",
+            "# QA 결과\n\n한글 본문과 경로가 깨지지 않아야 합니다.",
+            artifact_name="korean_qa_result",
+        )
+        store.append_event(
+            "agent_output",
+            "qa_1",
+            "한글 QA 완료",
+            {
+                "path": store.to_relative(artifact_path),
+                "qa_status": "PASS",
+                "note": "스크린샷과 결과 파일 확인",
+            },
+        )
+        store.append_transcript("QA 결과", "한글 transcript 본문 정상")
+
+        raw_state = (run_dir / "state.json").read_text(encoding="utf-8")
+        raw_events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        raw_transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
+        self.assertIn(user_request, raw_state)
+        self.assertIn("한글 QA 완료", raw_events)
+        self.assertIn("한글 transcript 본문 정상", raw_transcript)
+
+        events = EventService(self.project_root).list_events("utf8_korean")
+        qa_event = events[-1]
+        self.assertEqual(qa_event.title, "한글 QA 완료")
+        self.assertIn("QA 결과", qa_event.summary)
+        self.assertEqual(qa_event.artifacts[0].path, "qa/한글_결과.md")
+
+        content = ArtifactService(self.project_root).read_artifact("utf8_korean", "qa/한글_결과.md")
+        self.assertEqual(content.encoding, "utf-8")
+        self.assertIn("한글 본문", content.content)
+
     def test_event_service_exposes_qa_evidence_artifacts(self) -> None:
         qa_dir = self.run_dir / "qa" / "attempt_00"
         qa_dir.mkdir(parents=True)
         (qa_dir / "qa_scenarios.json").write_text('{"scenarios": []}\n', encoding="utf-8")
         (qa_dir / "scenario_results.json").write_text('{"status": "PASS"}\n', encoding="utf-8")
+        (qa_dir / "evidence_manifest.json").write_text('{"status": "PASS"}\n', encoding="utf-8")
         (qa_dir / "initial.png").write_bytes(b"\x89PNG\r\n\x1a\n")
         (self.run_dir / "qa_report.md").write_text("# QA\n", encoding="utf-8")
         self.store.append_event(
@@ -436,6 +564,7 @@ class AppServiceTests(unittest.TestCase):
             {
                 "ok": True,
                 "scenario_path": "qa/attempt_00/qa_scenarios.json",
+                "evidence_manifest_path": "qa/attempt_00/evidence_manifest.json",
                 "screenshots": ["qa/attempt_00/initial.png"],
                 "artifact_paths": ["qa/attempt_00/scenario_results.json"],
                 "report_path": "qa_report.md",
@@ -447,6 +576,7 @@ class AppServiceTests(unittest.TestCase):
         artifact_paths = {artifact.path for artifact in qa_event.artifacts}
 
         self.assertIn("qa/attempt_00/qa_scenarios.json", artifact_paths)
+        self.assertIn("qa/attempt_00/evidence_manifest.json", artifact_paths)
         self.assertIn("qa/attempt_00/scenario_results.json", artifact_paths)
         self.assertIn("qa/attempt_00/initial.png", artifact_paths)
         self.assertIn("qa_report.md", artifact_paths)
@@ -764,6 +894,27 @@ class AsyncDevelopmentFakeWorkflowEngine(FakeWorkflowEngine):
         store.clear_active_step()
 
 
+class AsyncQaFixFakeWorkflowEngine(FakeWorkflowEngine):
+    def __init__(self, project_root: Path) -> None:
+        super().__init__(project_root)
+        self.qa_fix_called = False
+        self.qa_fix_feedback: list[str | None] = []
+        self.started_processes: list[tuple[str, str]] = []
+
+    async def run_qa_fix_async(self, run_id: str, *, feedback: str | None = None, process_started=None) -> None:
+        self.qa_fix_called = True
+        self.qa_fix_feedback.append(feedback)
+        if process_started:
+            self.started_processes.append(("fix", "code_1"))
+            process_started("fix", "code_1", FakeProcessHandle())
+        await asyncio.sleep(0.01)
+        run_dir = self.project_root / "runs" / run_id
+        store = StateStore(run_dir)
+        store.write_artifact("qa/attempt_01/operator_qa_fix_feedback.md", feedback or "", artifact_name="operator_qa_fix_feedback")
+        store.set_status("awaiting_qa_approval")
+        store.clear_active_step()
+
+
 class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -922,6 +1073,30 @@ class RunWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final.status, "development_scaffold_completed")
             self.assertEqual(final.state["active_step"]["stage"], None)
             self.assertNotIn(detail.run_id, worker.active_processes)
+        finally:
+            await worker.stop()
+
+    async def test_qa_fix_request_enqueues_qa_fix_job(self) -> None:
+        engine = AsyncQaFixFakeWorkflowEngine(self.project_root)
+        worker = RunWorker(self.project_root, engine=engine)
+        await worker.start()
+        try:
+            service = RunService(self.project_root, worker=worker)
+            detail = service.create_run(RunCreateRequest(user_request="Build an app"))
+            StateStore(Path(detail.run_dir)).set_status("awaiting_qa_approval")
+
+            await service.request_qa_fix_and_enqueue(
+                detail.run_id,
+                OperatorActionRequest(user_id="tester", feedback="Improve the dashboard analysis"),
+            )
+            await worker.wait_idle(timeout=3)
+
+            final = service.get_run(detail.run_id)
+            self.assertTrue(engine.qa_fix_called)
+            self.assertEqual(engine.qa_fix_feedback[-1], "Improve the dashboard analysis")
+            self.assertEqual(engine.started_processes, [("fix", "code_1")])
+            self.assertEqual(final.status, "awaiting_qa_approval")
+            self.assertTrue((Path(final.run_dir) / "qa" / "attempt_01" / "operator_qa_fix_feedback.md").exists())
         finally:
             await worker.stop()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -9,6 +10,9 @@ from typing import Any
 
 
 def workspace_root() -> Path:
+    override = os.environ.get("ORCHESTRA_QA_WORKSPACE_ROOT")
+    if override:
+        return Path(override).resolve()
     return Path(__file__).resolve().parents[1]
 
 
