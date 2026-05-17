@@ -28,7 +28,7 @@ Integration requirements:
 - Keep `codex_app_manifest.json` valid, aligned with the final runnable app,
   and compliant with `docs/CODEX_APP_MANIFEST.md`.
 - Commands in manifests must be JSON arrays, not shell strings.
-- Keep dependencies minimal.
+- Keep dependencies purposeful and documented.
 - Do not write outside `integration/merged_app`.
 
 Repair requirements:

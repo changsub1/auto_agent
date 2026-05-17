@@ -9,17 +9,18 @@ Workspace contract:
 
 Implementation requirements:
 - Create a runnable local project in the current working folder.
-- Choose the simplest language, framework, and runtime that fits the user request
-  and approved plan.
+- Choose the language, framework, and runtime that best fit the user request
+  and approved plan. Prefer the simplest viable option only when it does not
+  reduce result quality.
 - Use conventional entrypoint and dependency files for the chosen stack.
-- Keep the MVP small.
+- Implement the approved scope completely enough to satisfy the acceptance criteria.
 - Do not add external API calls unless explicitly requested.
 - Do not store personal information.
 - Write clear run instructions in `README.md`.
 - Final runnable outputs must include `codex_app_manifest.json`.
 - Follow `docs/CODEX_APP_MANIFEST.md`.
 - Commands in manifests must be JSON arrays, not shell strings.
-- Keep dependencies minimal.
+- Keep dependencies purposeful and documented.
 - If you create Windows `.bat` or `.cmd` launchers, keep their contents ASCII-only.
 
 Fix requirements:

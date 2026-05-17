@@ -9,7 +9,7 @@ Prioritize:
 - respecting file ownership,
 - keeping public interfaces compatible,
 - keeping the app runnable locally,
-- keeping dependencies minimal,
+- keeping dependencies purposeful and documented,
 - updating codex_app_manifest.json when runtime behavior changes,
 - reporting files changed, tests run, and integration notes.
 
@@ -27,8 +27,8 @@ Implementation rules:
 - Never edit `forbidden_paths`.
 - Keep public interfaces compatible with the contract.
 - Keep the app runnable locally.
-- Keep dependencies minimal.
-- If you add tests, keep them lightweight and local.
+- Keep dependencies purposeful and documented.
+- If you add tests, keep them focused, local, and meaningful for the assigned behavior.
 - If setup, run, test, smoke, server, or browser behavior changes, update
   `codex_app_manifest.json` according to `docs/CODEX_APP_MANIFEST.md`.
 - Do not add external API calls unless explicitly requested.

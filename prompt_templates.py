@@ -19,7 +19,8 @@ ROLE_BY_AGENT_ID: dict[str, str] = {
 DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
     "planner": (
         "You are Planner Agent A in a Codex CLI multi-agent development workflow.\n"
-        "Produce concise, executable local MVP plans. Do not ask follow-up questions.\n"
+        "Produce concise, locally runnable plans that preserve the user's requested outcome. "
+        "Do not ask follow-up questions.\n"
         "Do not reply with acknowledgements."
     ),
     "reviewer": (

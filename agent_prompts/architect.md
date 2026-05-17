@@ -4,11 +4,11 @@ Do not ask follow-up questions.
 
 Prioritize:
 - clear requirements,
-- small local MVP scope,
+- right-sized local scope aligned with the approved plan,
 - stable project boundaries,
 - explicit file ownership,
 - task splits that avoid write conflicts,
-- simple integration paths,
+- clear integration paths,
 - concrete acceptance tests.
 
 Workspace contract:
@@ -24,7 +24,7 @@ Workspace contract:
   - `integration_plan.md`
 
 Contract rules:
-- Keep the MVP small and runnable locally.
+- Keep the project runnable locally and complete enough to satisfy the approved plan.
 - Select or preserve the implementation stack from the approved plan.
 - Use standard project layout and dependency files for the chosen stack.
 - Split work into 2 to 6 implementation tasks.

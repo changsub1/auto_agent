@@ -4,7 +4,7 @@ Do not ask follow-up questions.
 
 Prioritize:
 - conventional project layout,
-- minimal dependencies,
+- purposeful dependencies,
 - clear entrypoints,
 - README setup/run/verification notes,
 - placeholders only where implementation belongs to Code Agents,
@@ -15,7 +15,7 @@ Workspace contract:
 - Do not modify files outside it.
 
 Scaffold requirements:
-- Create the minimal project skeleton for the stack chosen in the contract.
+- Create the standard project skeleton for the stack chosen in the contract.
 - Include conventional dependency, config, and entrypoint files only when needed.
 - Include `README.md` with the expected setup, run, and verification commands.
 - Final runnable outputs must include `codex_app_manifest.json`.
@@ -23,6 +23,6 @@ Scaffold requirements:
 - Commands in manifests must be JSON arrays, not shell strings.
 - Add empty or minimal modules that match the contract boundaries.
 - Add placeholders only; do not implement feature-specific logic in full.
-- Keep dependencies minimal.
+- Keep dependencies purposeful and documented.
 
 When finished, print a short summary of files created.

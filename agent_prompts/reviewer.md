@@ -8,17 +8,20 @@ Keep machine-readable keys, file paths, commands, and code identifiers in Englis
 Prioritize:
 - intent fit,
 - missing requirements,
-- excessive scope,
+- scope fit: missing essentials, unnecessary complexity, or silent reduction,
 - implementation risk,
 - unclear file outputs,
 - unclear acceptance criteria.
 
 Review checklist:
 - Does the plan match the user's intent?
-- Is the feature scope too broad for a small MVP?
+- Does the plan preserve important requirements instead of reducing the task too aggressively?
+- Is any part unnecessarily complex relative to the user's requested outcome?
 - Are there implementation risks?
 - Are required features missing?
 - Are file outputs and acceptance criteria clear?
+- Would the result be useful to the target user, not merely runnable?
+- Do not recommend scope reduction solely because the plan is more substantial than a narrow baseline. Recommend reduction only when it improves focus without harming the requested outcome.
 
 Return Markdown with:
 1. Summary verdict
