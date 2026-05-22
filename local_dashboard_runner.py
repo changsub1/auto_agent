@@ -1051,6 +1051,7 @@ async def run_llm_qa_stage_async(
     _snapshot_final_prompts_from_logs(store)
     review_sections: list[str] = []
     failed_reviews: list[str] = []
+    fix_feedback_sections: list[str] = []
     artifact_paths = list(mechanical_result.artifact_paths)
     screenshots = list(mechanical_result.screenshots)
     affected_paths = list(mechanical_result.affected_paths)
@@ -1104,6 +1105,18 @@ async def run_llm_qa_stage_async(
             failed_reviews.extend(f"{agent_id}: hard policy - {error}" for error in hard_policy_errors)
         if verdict_error:
             failed_reviews.append(f"{agent_id}: verdict error - {verdict_error}")
+        if status != "PASS" or hard_policy_errors or verdict_error:
+            fix_feedback_sections.append(
+                _workspace_fix_feedback_section(
+                    agent_id=agent_id,
+                    workspace_dir=workspace_dir,
+                    verdict=verdict,
+                    verdict_path=verdict_path,
+                    findings_path=findings_path,
+                    verdict_error=verdict_error,
+                    hard_policy_errors=hard_policy_errors,
+                )
+            )
 
         artifact_paths.extend(workspace_artifacts)
         screenshots.extend(workspace_screenshots)
@@ -1171,7 +1184,14 @@ async def run_llm_qa_stage_async(
 
     llm_ok = not failed_reviews
     ok = mechanical_result.ok and llm_ok
-    llm_error_log = "\n".join(failed_reviews)
+    llm_error_log = "\n\n".join(
+        part
+        for part in [
+            "\n".join(failed_reviews),
+            "\n\n".join(section for section in fix_feedback_sections if section.strip()),
+        ]
+        if part.strip()
+    )
     error_log = "\n\n".join(part for part in [mechanical_result.error_log, llm_error_log] if part)
     status = "PASS" if ok else "FAIL"
     report = "\n".join(
@@ -1355,20 +1375,21 @@ def build_single_code_assignment(config: LocalRunConfig, generated_app_dir: Path
         tasks=[
             {
                 "id": "T1",
-                "title": "Complete application implementation",
-                "summary": "Implement the approved app end to end in the generated_app directory.",
+                "title": "Build runnable app",
+                "summary": "Implement the complete local app in generated_app.",
                 "dependencies": [],
                 "owned_paths": ["."],
                 "allowed_shared_paths": [],
                 "forbidden_paths": ["contract/", "runs/", "agent_workspaces/", "integration/"],
                 "interfaces": [
-                    "Create the complete runnable app.",
-                    "Create README.md with setup, run, and test instructions.",
-                    "Create codex_app_manifest.json with at least one safe non-interactive check.",
+                    "Complete runnable app.",
+                    "README.md with setup, run, and test notes.",
+                    "codex_app_manifest.json with one safe local check.",
                 ],
                 "acceptance_criteria": [
-                    "The app satisfies the approved plan.",
-                    "The app can be checked by the local QA harness without human input when practical.",
+                    "Satisfies the original request using source-file evidence.",
+                    "Planner brief is guidance; improve on it when the data supports a better result.",
+                    "Local QA can check it without human input when practical.",
                 ],
             }
         ],
@@ -1379,17 +1400,14 @@ def render_single_code_context(final_plan: str, route: Any) -> str:
     code_brief = extract_code_brief_from_plan(final_plan)
     return "\n\n".join(
         [
-            "# Approved Plan",
-            code_brief or "(missing final plan)",
-            "# Routing",
-            f"- mode: {getattr(route, 'mode', 'single')}",
-            f"- reason: {getattr(route, 'reason', 'Single-code route selected.')}",
-            "# App Manifest Requirement",
+            "# Planner Brief",
             (
-                "Create `codex_app_manifest.json` in the app root. It must describe safe local "
-                "setup, test, smoke, server, or browser checks using JSON array commands, not shell strings. "
-                "Prefer checks that need no network and no human input."
+                "Use this as guidance, not as an approved specification. Re-check local inputs "
+                "yourself and improve on the brief when source evidence supports a better result."
             ),
+            code_brief or "(missing final plan)",
+            "# Route Context",
+            f"- mode: {getattr(route, 'mode', 'single')}",
         ]
     )
 
@@ -2223,6 +2241,69 @@ def _workspace_verdict_list(verdict: dict[str, Any], key: str) -> list[str]:
             continue
         values.append(text)
     return values
+
+
+def _workspace_fix_feedback_section(
+    *,
+    agent_id: str,
+    workspace_dir: Path,
+    verdict: dict[str, Any],
+    verdict_path: Path,
+    findings_path: Path,
+    verdict_error: str | None,
+    hard_policy_errors: list[str],
+) -> str:
+    lines = [
+        f"# QA Feedback For Fix: {agent_id}",
+        f"- Verdict status: {_workspace_verdict_status(verdict)}",
+        f"- Verdict path: {_workspace_relative(workspace_dir, verdict_path)}",
+    ]
+    summary = str(verdict.get("summary") or "").strip()
+    if summary:
+        lines.extend(["", "## Verdict Summary", _short_text(summary, max_chars=1200)])
+
+    findings = _workspace_verdict_list(verdict, "findings")
+    if findings:
+        lines.extend(["", "## Findings"])
+        lines.extend(f"- {finding}" for finding in findings[:8])
+
+    affected_paths = _workspace_verdict_list(verdict, "affected_paths")
+    if affected_paths:
+        lines.extend(["", "## Affected Paths"])
+        lines.extend(f"- {path}" for path in affected_paths[:12])
+
+    suspected_owners = _workspace_verdict_list(verdict, "suspected_owners")
+    if suspected_owners:
+        lines.extend(["", "## Suspected Owners"])
+        lines.extend(f"- {owner}" for owner in suspected_owners[:8])
+
+    evidence = _workspace_verdict_list(verdict, "evidence")
+    if evidence:
+        lines.extend(["", "## Evidence"])
+        lines.extend(f"- {item}" for item in evidence[:12])
+
+    if hard_policy_errors:
+        lines.extend(["", "## Hard Policy Errors"])
+        lines.extend(f"- {error}" for error in hard_policy_errors)
+
+    if verdict_error:
+        lines.extend(["", "## Verdict Parse Error", verdict_error])
+
+    if findings_path.exists():
+        try:
+            findings_text = findings_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            findings_text = ""
+        if findings_text:
+            lines.extend(
+                [
+                    "",
+                    f"## QA Findings Detail ({_workspace_relative(workspace_dir, findings_path)})",
+                    _short_text(findings_text, max_chars=3500),
+                ]
+            )
+
+    return "\n".join(lines).strip()
 
 
 def _collect_qa_workspace_screenshots(workspace_dir: Path) -> list[Path]:

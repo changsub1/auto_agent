@@ -43,7 +43,8 @@ class CodeBriefExtractionTests(unittest.TestCase):
 
         context = render_single_code_context(plan, route)
 
-        self.assertIn("# Approved Plan", context)
+        self.assertIn("# Planner Brief", context)
+        self.assertIn("not as an approved specification", context)
         self.assertIn("Outcome: build the app", context)
         self.assertNotIn("Internal rationale", context)
         self.assertIn("- mode: balanced", context)
