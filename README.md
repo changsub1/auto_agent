@@ -111,8 +111,11 @@ QA hard policy:
 
 CMD 기준:
 
+아래 명령어의 첫 줄에서 `C:\path\to\multi_codex_dev_mvp`는 사용자가 실제로 이 프로젝트를 내려받은 폴더로 바꾸어야 합니다.
+
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%"
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m playwright install chromium
 ```
@@ -120,7 +123,7 @@ cd /d D:\curs\auto\multi_codex_dev_mvp
 프론트엔드 의존성:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
+cd /d "%PROJECT_DIR%\ux"
 npm install
 ```
 
@@ -140,9 +143,10 @@ Tauri 앱은 FastAPI sidecar를 자동으로 실행합니다.
 CMD 기준:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
-set ORCHESTRA_REPO_ROOT=D:\curs\auto\multi_codex_dev_mvp
-set ORCHESTRA_PYTHON=D:\curs\auto\multi_codex_dev_mvp\.venv\Scripts\python.exe
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux"
+set ORCHESTRA_REPO_ROOT=%PROJECT_DIR%
+set ORCHESTRA_PYTHON=%PROJECT_DIR%\.venv\Scripts\python.exe
 npm run tauri:dev
 ```
 
@@ -159,14 +163,16 @@ npm run tauri:dev
 터미널 1:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%"
 .\.venv\Scripts\python.exe run_local_api.py --host 127.0.0.1 --port 8765
 ```
 
 터미널 2:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux"
 npm run dev
 ```
 
@@ -181,14 +187,16 @@ http://127.0.0.1:5173
 프론트엔드 빌드:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux"
 npm run build
 ```
 
 Tauri 앱 빌드:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux"
 npm run tauri:build
 ```
 
@@ -265,21 +273,24 @@ tests/               # Python unittest
 백엔드:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%"
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 프론트엔드:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux"
 npm run build
 ```
 
 Tauri Rust:
 
 ```cmd
-cd /d D:\curs\auto\multi_codex_dev_mvp\ux\src-tauri
+set PROJECT_DIR=C:\path\to\multi_codex_dev_mvp
+cd /d "%PROJECT_DIR%\ux\src-tauri"
 cargo check
 ```
 
