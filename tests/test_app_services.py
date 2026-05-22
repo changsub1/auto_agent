@@ -426,9 +426,9 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(role_for_agent_id("planner_a"), "planner")
         planner_prompt = load_agent_system_prompt(self.project_root, agent_id="planner_a")
         reviewer_prompt = load_agent_system_prompt(self.project_root, agent_id="planner_b")
-        self.assertIn("vague or non-expert requests", planner_prompt)
-        self.assertIn("inferred requirements", planner_prompt)
-        self.assertIn("expert-grade specification", reviewer_prompt)
+        self.assertIn("compact decision brief", planner_prompt)
+        self.assertIn("Code Brief", planner_prompt)
+        self.assertIn("smallest useful execution contract", reviewer_prompt)
         self.assertIn("Code Agent", load_agent_system_prompt(self.project_root, agent_id="code_2"))
         self.assertIn("QA Agent", load_agent_system_prompt(self.project_root, agent_id="qa_2"))
 

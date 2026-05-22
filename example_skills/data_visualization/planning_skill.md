@@ -25,22 +25,20 @@ scripts, libraries, or technical pipeline.
 - Inspect attached data when available and record the visual implications:
   analysis unit, time variables, categorical fields, quantitative fields,
   missingness, skew, outliers, and group-size differences.
-- Separate visual requirements by analytical purpose:
-  - overview and headline indicators
-  - ranking or category comparison
-  - time trend
-  - distribution and outliers
-  - proportion or composition
-  - relationship or correlation
-  - drill-down and audit table
-- For each required view, state what question it answers and what a good user
-  should be able to conclude from it.
-- Do not settle for KPI cards and rank tables when the data supports important
-  time, distribution, or outlier analysis.
+- Select the 2-4 highest-value analytical purposes for the Code Brief. Do not
+  promote every possible purpose into mandatory scope.
+- Consider these purposes, then choose only the ones that matter most:
+  overview/headline indicators, ranking/category comparison, time trend,
+  distribution/outliers, proportion/composition, relationship/correlation, and
+  drill-down/audit table.
+- Phrase the Code Brief as core questions and guardrails, not as a fixed chart
+  inventory. Let the Code Agent choose the exact layout and chart count.
+- Keep optional visual ideas in Planner Notes unless omitting them would make
+  the result fail the user's goal.
 - Plan filters and presets in user language. Prefer understandable choices over
   forcing users to type exact thresholds.
-- Include a validation path: users should be able to inspect the rows, metrics,
-  or calculation logic behind important visual claims.
+- Include a lightweight validation path: users should be able to inspect the
+  rows, metrics, or calculation logic behind important visual claims.
 - Define acceptance criteria in terms of user-visible insight quality and
   visual correctness, not implementation mechanics.
 
@@ -49,13 +47,13 @@ scripts, libraries, or technical pipeline.
 - Check whether the brief preserves the user's original visualization goal.
 - Check whether the visual plan would help the target audience make a decision,
   not merely display data.
-- Check whether important data dimensions were ignored: time, group, geography,
-  category, distribution, denominator, or outlier-sensitive metrics.
+- Check whether important data dimensions were ignored, but recommend adding
+  only dimensions that are essential to the user's main decision.
 - Check whether the brief distinguishes quantity from proportion.
 - Check whether average-only summaries hide skew, outliers, or small sample
   groups.
-- Check whether the proposed dashboard has a clear reading path.
-- Check whether chart choices are justified by the analytical task.
+- Check whether the proposed dashboard has a clear reading path without
+  becoming a gallery of loosely related charts.
+- Check whether the brief leaves chart and layout mechanics to the Code Agent.
 - If the brief drifts into implementation mechanics, translate that content
   back into the underlying user-visible requirement.
-
