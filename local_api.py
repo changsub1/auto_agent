@@ -67,7 +67,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Orchestra Local API",
-        version="15.0.0",
+        version="16.0.0",
         description="Local-only API for the Codex multi-agent desktop app.",
         lifespan=lifespan,
     )

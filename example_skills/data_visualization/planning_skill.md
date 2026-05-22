@@ -27,12 +27,20 @@ scripts, libraries, or technical pipeline.
   missingness, skew, outliers, and group-size differences.
 - Select the 2-4 highest-value analytical purposes for the Code Brief. Do not
   promote every possible purpose into mandatory scope.
+- Do not collapse the brief to a single leaderboard, score, or latest-period
+  snapshot when the data supports materially useful complementary perspectives.
 - Consider these purposes, then choose only the ones that matter most:
   overview/headline indicators, ranking/category comparison, time trend,
   distribution/outliers, proportion/composition, relationship/correlation, and
   drill-down/audit table.
+- Preserve selected purposes as analysis questions, not as required chart
+  types. For example, keep "how has this changed over time?" rather than
+  "add a line chart".
 - Phrase the Code Brief as core questions and guardrails, not as a fixed chart
   inventory. Let the Code Agent choose the exact layout and chart count.
+- If several perspectives are useful, mention that tabs, segmented views, or
+  master-detail organization may help keep the dashboard clean, while leaving
+  exact UI composition to the Code Agent.
 - Keep optional visual ideas in Planner Notes unless omitting them would make
   the result fail the user's goal.
 - Plan filters and presets in user language. Prefer understandable choices over
@@ -49,6 +57,8 @@ scripts, libraries, or technical pipeline.
   not merely display data.
 - Check whether important data dimensions were ignored, but recommend adding
   only dimensions that are essential to the user's main decision.
+- Flag over-pruning when the brief drops a meaningful time, relationship,
+  distribution, or subgroup perspective that would materially improve insight.
 - Check whether the brief distinguishes quantity from proportion.
 - Check whether average-only summaries hide skew, outliers, or small sample
   groups.

@@ -17,6 +17,8 @@ Prioritize:
 - whether the brief identifies the user's main decision goal,
 - missing code-critical constraints,
 - unnecessary breadth that would make the implementation broad but shallow,
+- over-pruning that discards a useful analysis perspective such as time change,
+  relationship, distribution, or subgroup comparison,
 - evidence grounding for data-driven tasks,
 - clear, testable done criteria.
 
@@ -30,6 +32,9 @@ Review method:
   the user request, attached files, or inspected evidence.
 - Recommend adding scope only when the current brief would fail the user's
   stated outcome. Otherwise recommend pruning or moving detail to Planner Notes.
+- When a visualization brief is too narrow, ask Planner A to preserve the
+  missing analysis perspective as a user question. Do not ask for a specific
+  chart type unless the user explicitly requested it.
 
 Grounding review for attached files:
 - If attached files drive the task, verify that Planner A inspected the actual
@@ -46,6 +51,9 @@ Review checklist:
 - Does it avoid prescribing implementation mechanics?
 - Does it avoid turning every possible analysis axis or view into a mandatory
   feature?
+- Does it avoid collapsing a multi-dimensional dataset into only one ranking,
+  score, or latest-year snapshot when other dimensions would materially improve
+  insight?
 - Are optional ideas kept out of `Code Brief` or moved to `Planner Notes`?
 - Would following only `Code Brief` produce a useful result for the target user?
 - For attached data, are only code-critical facts promoted into `Code Brief`?

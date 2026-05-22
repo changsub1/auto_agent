@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable
@@ -29,6 +30,13 @@ def _system_prompt(agent_id: str, override: str | None = None) -> str:
     if override and override.strip():
         return override.strip()
     return load_agent_system_prompt(agent_id=agent_id)
+
+
+def _compact_json_for_prompt(value: str) -> str:
+    try:
+        return json.dumps(json.loads(value), ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return value.strip()
 
 
 class PlannerAgent:
@@ -625,19 +633,20 @@ class CodeAgent:
 
             {_reference_block(self.reference_markdown)}
 
-            Highest-priority original user request:
+            Original user request (highest priority):
             {user_request}
 
-            Contract bundle:
+            Planning context:
             {contract_bundle}
 
-            Your assignment:
-            {assigned_tasks_json}
+            Workspace and ownership assignment:
+            {_compact_json_for_prompt(assigned_tasks_json)}
 
-            Implement the assignment according to your system prompt. Preserve
-            the highest-priority original user request when the contract bundle
-            or assignment would weaken or change an explicit user-visible
-            constraint.
+            Build the best local result for the original request. Use the
+            planning context as guidance and the assignment as workspace/path
+            boundaries. When guidance would weaken the result, follow the user
+            request and source-file evidence, then mention the deviation in
+            your final notes.
             """
         ).strip()
 
@@ -715,24 +724,23 @@ class CodeAgent:
 
             {_reference_block(self.reference_markdown)}
 
-            Highest-priority original user request:
+            Original user request (highest priority):
             {user_request}
 
-            Contract bundle:
+            Planning context:
             {contract_bundle}
 
-            Your assignment:
-            {assigned_tasks_json}
+            Workspace and ownership assignment:
+            {_compact_json_for_prompt(assigned_tasks_json)}
 
             QA/user feedback:
             {qa_feedback}
 
             Fix iteration: {iteration}
 
-            Fix the assigned work according to your system prompt. Preserve the
-            highest-priority original user request when QA feedback, the
-            contract bundle, or assignment would weaken or change an explicit
-            user-visible constraint.
+            Fix the assigned work while preserving the original user request.
+            Use planning context and QA feedback as guidance, but follow
+            source-file evidence when it would produce a better result.
             """
         ).strip()
 

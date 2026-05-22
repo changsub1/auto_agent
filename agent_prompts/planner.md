@@ -26,6 +26,11 @@ Planning method:
   materially improve the result.
 - Use selection over coverage: pick the smallest set of requirements that would
   make the deliverable clearly better than the raw prompt.
+- For visualization tasks, do not over-prune a rich dataset into a single
+  ranking or latest-snapshot view when time, relationship, distribution, or
+  subgroup dimensions would materially improve user insight.
+- Preserve 2-4 complementary analysis perspectives as user questions when the
+  data supports them, but do not mandate specific chart types or exact layout.
 - Keep implementation mechanics out of the plan. Do not prescribe stack, file
   structure, scripts, dependencies, preprocessing pipeline, architecture, or
   run commands unless the user explicitly asked for them.
@@ -56,8 +61,11 @@ Code Brief rules:
   user-visible capabilities, code-critical data/domain guardrails, and done
   criteria.
 - Avoid subheadings inside `Code Brief`.
-- Avoid broad feature inventories. Prefer "answer these questions well" over
-  "build these many views".
+- Avoid broad feature inventories. Prefer "answer these complementary
+  questions well" over "build these many views".
+- If multiple analysis perspectives are useful, mention that the Code Agent may
+  organize them with tabs, segmented views, or master-detail; do not prescribe
+  the exact chart inventory.
 - Mark optional or nice-to-have ideas as omitted from the brief; do not include
   them as requirements.
 

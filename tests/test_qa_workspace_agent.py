@@ -212,6 +212,63 @@ class QAWorkspaceAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest["status"], "FAIL")
         self.assertTrue(manifest["hard_policy_errors"])
 
+    async def test_failed_workspace_verdict_becomes_fix_feedback(self) -> None:
+        async def fake_run_codex(prompt, workdir, **kwargs):
+            workdir = Path(workdir)
+            (workdir / "evidence" / "qa_findings.md").write_text(
+                "# Findings\n\nSearch zero-state leaves stale KPI values visible.\n",
+                encoding="utf-8",
+            )
+            (workdir / "evidence" / "command_log.jsonl").write_text(
+                '{"command":["zero_state_probe"],"exit_code":1}\n',
+                encoding="utf-8",
+            )
+            (workdir / "evidence" / "verdict.json").write_text(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "summary": "Filter result and detail panel disagree when no rows match.",
+                        "findings": ["stale detailStartup after zero results: 3,749,000"],
+                        "evidence": ["evidence/commands/zero_state_probe_stderr.txt"],
+                        "affected_paths": ["app/app.js"],
+                        "suspected_owners": ["code_1"],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return CodexResult(
+                stdout="QA_STATUS: FAIL\n",
+                stderr="",
+                returncode=0,
+                session_id="session-1",
+                resumed_session_id=None,
+                model=None,
+                reasoning_effort=None,
+                effective_approval="never",
+                effective_sandbox="workspace-write",
+            )
+
+        with patch("agents.run_codex_result_async", side_effect=fake_run_codex):
+            result = await run_llm_qa_stage_async(
+                self.run_dir,
+                self.logs_dir,
+                self.store,
+                _config(),
+                self.contract_dir,
+                self.generated_app,
+                self._mechanical_result(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertIn("# QA Feedback For Fix: qa_1", result.error_log)
+        self.assertIn("Filter result and detail panel disagree", result.error_log)
+        self.assertIn("stale detailStartup", result.error_log)
+        self.assertIn("app/app.js", result.error_log)
+        self.assertIn("Search zero-state leaves stale KPI", result.error_log)
+
     def test_host_browser_runner_executes_action_file_and_records_summary(self) -> None:
         workspace = self.run_dir / "qa" / "attempt_00" / "qa_workspace"
         (workspace / "app").mkdir(parents=True)

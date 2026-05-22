@@ -454,8 +454,9 @@ class AppServiceTests(unittest.TestCase):
 
         self.assertTrue(code_prompt.startswith("CUSTOM CODE ROLE TEMPLATE"))
         self.assertIn("Code skill note", code_prompt)
-        self.assertIn("Highest-priority original user request", code_prompt)
-        self.assertIn("Preserve\n            the highest-priority original user request", code_prompt)
+        self.assertIn("Original user request (highest priority)", code_prompt)
+        self.assertIn("Planning context", code_prompt)
+        self.assertIn("Build the best local result", code_prompt)
         self.assertNotIn("System prompt override", code_prompt)
 
     def test_settings_service_round_trips_agent_configs(self) -> None:
