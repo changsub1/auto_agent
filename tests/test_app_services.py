@@ -60,6 +60,63 @@ class AppServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _write_skill_registry_fixture(self) -> None:
+        example = self.project_root / "example_skills" / "data_analysis" / "common_checklist.md"
+        example.parent.mkdir(parents=True, exist_ok=True)
+        example.write_text(
+            "---\n"
+            "id: data-analysis/common-checklist\n"
+            "label: Data Analysis Checklist\n"
+            "source: Orchestra example skills\n"
+            "description: General data analysis checklist.\n"
+            "license: Project\n"
+            "recommended_for: planner, reviewer, code_agent, qa_agent\n"
+            "variant: example\n"
+            "---\n\n"
+            "# Data Analysis Checklist\n\nProfile data before charting.\n",
+            encoding="utf-8",
+        )
+        planning = self.project_root / "example_skills" / "data_analysis" / "planning_skill.md"
+        planning.write_text(
+            "---\n"
+            "id: data-analysis/planning-skill\n"
+            "label: Data Analysis Planner Skill\n"
+            "source: Orchestra example skills\n"
+            "description: Data analysis planner skill.\n"
+            "license: Project\n"
+            "recommended_for: planner, planner_a\n"
+            "variant: example\n"
+            "---\n\n"
+            "# Data Analysis Planner Skill\n\nTurn vague requests into analysis questions.\n",
+            encoding="utf-8",
+        )
+        reviewer = self.project_root / "example_skills" / "data_analysis" / "reviewer_skill.md"
+        reviewer.write_text(
+            "---\n"
+            "id: data-analysis/reviewer-skill\n"
+            "label: Data Analysis Reviewer Skill\n"
+            "source: Orchestra example skills\n"
+            "description: Data analysis reviewer skill.\n"
+            "license: Project\n"
+            "recommended_for: reviewer, planner_b\n"
+            "variant: example\n"
+            "---\n\n"
+            "# Data Analysis Reviewer Skill\n\nCheck whether plans are grounded in source data.\n",
+            encoding="utf-8",
+        )
+        qa_skill = self.project_root / "example_skills" / "data_analysis" / "qa_skill.md"
+        qa_skill.write_text(
+            "---\n"
+            "id: data-analysis/qa-skill\n"
+            "label: Data Analysis QA Skill\n"
+            "source: Orchestra example skills\n"
+            "description: Data analysis QA skill.\n"
+            "license: Project\n"
+            "recommended_for: qa_agent\n"
+            "variant: example\n"
+            "---\n\n"
+            "# Data Analysis QA Skill\n\nCheck data quality and analysis validity.\n",
+            encoding="utf-8",
+        )
         karpathy = (
             self.project_root
             / "external_skills"
@@ -288,8 +345,16 @@ class AppServiceTests(unittest.TestCase):
         registry = SkillRegistry(self.project_root)
         skills = registry.list_skills()
 
+        self.assertTrue(any(skill.id == "data-analysis/common-checklist" for skill in skills))
+        self.assertTrue(any(skill.id == "data-analysis/planning-skill" for skill in skills))
+        self.assertTrue(any(skill.id == "data-analysis/reviewer-skill" for skill in skills))
+        self.assertTrue(any(skill.id == "data-analysis/qa-skill" for skill in skills))
         self.assertTrue(any(skill.id == DEFAULT_CODE_AGENT_SKILL_ID for skill in skills))
         self.assertTrue(any(skill.id == "rules-books/clean-code/mini" for skill in skills))
+        self.assertIn("Data Analysis Checklist", registry.load_skill_markdown("data-analysis/common-checklist"))
+        self.assertIn("Data Analysis Planner Skill", registry.load_skill_markdown("data-analysis/planning-skill"))
+        self.assertIn("Data Analysis Reviewer Skill", registry.load_skill_markdown("data-analysis/reviewer-skill"))
+        self.assertIn("Data Analysis QA Skill", registry.load_skill_markdown("data-analysis/qa-skill"))
         self.assertIn("Karpathy Guidelines", registry.load_skill_markdown(DEFAULT_CODE_AGENT_SKILL_ID))
 
     def test_code_agent_defaults_to_karpathy_skill(self) -> None:
@@ -298,15 +363,21 @@ class AppServiceTests(unittest.TestCase):
 
         self.assertEqual(prompt.skill_id, DEFAULT_CODE_AGENT_SKILL_ID)
         self.assertIn("Karpathy Guidelines", prompt.skill_markdown)
-        self.assertIn("Source: forrestchang/andrej-karpathy-skills", prompt.skill_markdown)
+        self.assertNotIn("Source: forrestchang/andrej-karpathy-skills", prompt.skill_markdown)
+        self.assertNotIn("license: MIT", prompt.skill_markdown)
 
     def test_prompt_catalog_includes_skill_registry_entries(self) -> None:
         self._write_skill_registry_fixture()
         catalog = PromptService(self.project_root).catalog()
         skill_ids = {skill.id for skill in catalog.skills}
 
+        self.assertIn("data-analysis/common-checklist", skill_ids)
+        self.assertIn("data-analysis/planning-skill", skill_ids)
+        self.assertIn("data-analysis/reviewer-skill", skill_ids)
+        self.assertIn("data-analysis/qa-skill", skill_ids)
         self.assertIn(DEFAULT_CODE_AGENT_SKILL_ID, skill_ids)
         self.assertIn("rules-books/refactoring/mini", skill_ids)
+        self.assertTrue(next(skill for skill in catalog.skills if skill.id == "data-analysis/common-checklist").markdown)
         self.assertTrue(next(skill for skill in catalog.skills if skill.id == DEFAULT_CODE_AGENT_SKILL_ID).markdown)
 
     def test_snapshot_final_prompts_from_codex_logs(self) -> None:
@@ -353,6 +424,11 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(role_for_agent_id("code_2"), "code_agent")
         self.assertEqual(role_for_agent_id("qa_2"), "qa_agent")
         self.assertEqual(role_for_agent_id("planner_a"), "planner")
+        planner_prompt = load_agent_system_prompt(self.project_root, agent_id="planner_a")
+        reviewer_prompt = load_agent_system_prompt(self.project_root, agent_id="planner_b")
+        self.assertIn("vague or non-expert requests", planner_prompt)
+        self.assertIn("inferred requirements", planner_prompt)
+        self.assertIn("expert-grade specification", reviewer_prompt)
         self.assertIn("Code Agent", load_agent_system_prompt(self.project_root, agent_id="code_2"))
         self.assertIn("QA Agent", load_agent_system_prompt(self.project_root, agent_id="qa_2"))
 
@@ -378,6 +454,8 @@ class AppServiceTests(unittest.TestCase):
 
         self.assertTrue(code_prompt.startswith("CUSTOM CODE ROLE TEMPLATE"))
         self.assertIn("Code skill note", code_prompt)
+        self.assertIn("Highest-priority original user request", code_prompt)
+        self.assertIn("Preserve\n            the highest-priority original user request", code_prompt)
         self.assertNotIn("System prompt override", code_prompt)
 
     def test_settings_service_round_trips_agent_configs(self) -> None:

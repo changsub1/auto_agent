@@ -625,7 +625,7 @@ class CodeAgent:
 
             {_reference_block(self.reference_markdown)}
 
-            User request:
+            Highest-priority original user request:
             {user_request}
 
             Contract bundle:
@@ -634,7 +634,10 @@ class CodeAgent:
             Your assignment:
             {assigned_tasks_json}
 
-            Implement the assignment according to your system prompt.
+            Implement the assignment according to your system prompt. Preserve
+            the highest-priority original user request when the contract bundle
+            or assignment would weaken or change an explicit user-visible
+            constraint.
             """
         ).strip()
 
@@ -712,7 +715,7 @@ class CodeAgent:
 
             {_reference_block(self.reference_markdown)}
 
-            User request:
+            Highest-priority original user request:
             {user_request}
 
             Contract bundle:
@@ -726,7 +729,10 @@ class CodeAgent:
 
             Fix iteration: {iteration}
 
-            Fix the assigned work according to your system prompt.
+            Fix the assigned work according to your system prompt. Preserve the
+            highest-priority original user request when QA feedback, the
+            contract bundle, or assignment would weaken or change an explicit
+            user-visible constraint.
             """
         ).strip()
 

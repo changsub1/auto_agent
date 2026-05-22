@@ -489,6 +489,7 @@ Implemented notes:
 
 - Added `skill_registry.py`.
 - The registry discovers:
+  - local `example_skills/` Markdown skills for demos and tests,
   - `Karpathy Guidelines` from `external_skills/andrej-karpathy-skills-main`,
   - `agent-rules-books` `mini` and `nano` Markdown rules from
     `external_skills/agent-rules-books-main`.
@@ -496,7 +497,10 @@ Implemented notes:
   is intentionally excluded from the default Skill Registry because most gstack
   skills are long Claude/gstack workflow documents rather than lightweight
   language-neutral coding guidance.
-- Code Agents default to `Karpathy Guidelines`.
+- Code Agents default to `Karpathy Guidelines` because it is broad development
+  guidance. Local example skills are selectable from the GUI but are not applied
+  by default. The data-analysis example set is split into Common, Planning, and
+  QA skills.
 - Planner, Architect, Integrator, and QA agents keep empty/default
   Skill / Guideline text unless the user selects or writes one.
 - `/prompts` now returns `skills` alongside QA presets.

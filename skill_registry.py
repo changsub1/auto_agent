@@ -36,11 +36,12 @@ class SkillRegistry:
 
     def list_skills(self) -> list[SkillRecord]:
         skills: list[SkillRecord] = []
+        skills.extend(self._example_skills())
         karpathy = self._karpathy_skill()
         if karpathy is not None:
             skills.append(karpathy)
         skills.extend(self._rules_books_skills())
-        return sorted(skills, key=lambda item: (0 if item.id == DEFAULT_CODE_AGENT_SKILL_ID else 1, item.label.lower()))
+        return sorted(skills, key=_skill_sort_key)
 
     def get_skill(self, skill_id: str) -> SkillRecord | None:
         normalized = skill_id.strip()
@@ -57,20 +58,12 @@ class SkillRegistry:
             return ""
         path = self.project_root / skill.relative_path
         try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            text = _strip_frontmatter(path.read_text(encoding="utf-8", errors="replace")).strip()
         except OSError:
             return ""
         if len(text) > max_chars:
             text = text[:max_chars].rstrip() + "\n\n[truncated]"
-        header = [
-            f"Selected skill: {skill.label}",
-            f"Source: {skill.source}",
-            f"License: {skill.license}",
-            f"Path: {skill.relative_path}",
-        ]
-        if skill.description:
-            header.append(f"Description: {skill.description}")
-        return "\n".join(header) + "\n\n" + text
+        return text
 
     def _karpathy_skill(self) -> SkillRecord | None:
         candidates = [
@@ -99,6 +92,32 @@ class SkillRegistry:
             recommended_for=("code_agent",),
             variant="skill",
         )
+
+    def _example_skills(self) -> list[SkillRecord]:
+        root = self.project_root / "example_skills"
+        if not root.exists():
+            return []
+        records: list[SkillRecord] = []
+        for path in sorted(root.glob("*/*.md")):
+            if not path.is_file():
+                continue
+            text = _read_text(path)
+            skill_id = _frontmatter_value(text, "id") or _relative_to_project(path, self.project_root).removesuffix(".md")
+            label = _frontmatter_value(text, "label") or _title_from_slug(path.stem)
+            records.append(
+                SkillRecord(
+                    id=skill_id,
+                    label=label,
+                    source=_frontmatter_value(text, "source") or "Orchestra example skills",
+                    description=_frontmatter_value(text, "description"),
+                    license=_frontmatter_value(text, "license") or "Project",
+                    relative_path=_relative_to_project(path, self.project_root),
+                    size_chars=len(text),
+                    recommended_for=tuple(_frontmatter_list(text, "recommended_for")),
+                    variant=_frontmatter_value(text, "variant") or "example",
+                )
+            )
+        return records
 
     def _rules_books_skills(self) -> list[SkillRecord]:
         root = self.project_root / "external_skills" / "agent-rules-books-main"
@@ -151,6 +170,17 @@ def _frontmatter_value(text: str, key: str) -> str:
     return field.group(1).strip().strip('"') if field else ""
 
 
+def _strip_frontmatter(text: str) -> str:
+    return re.sub(r"^---\n.*?\n---\s*", "", text, count=1, flags=re.S)
+
+
+def _frontmatter_list(text: str, key: str) -> list[str]:
+    value = _frontmatter_value(text, key)
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 def _title_from_slug(slug: str) -> str:
     special = {
         "ddd": "DDD",
@@ -173,3 +203,13 @@ def _first_nonempty_line_after_heading(text: str, heading: str) -> str:
             if stripped and not stripped.startswith("#"):
                 return stripped[:240]
     return ""
+
+
+def _skill_sort_key(item: SkillRecord) -> tuple[int, str]:
+    if item.source == "Orchestra example skills":
+        group = 0
+    elif item.id == DEFAULT_CODE_AGENT_SKILL_ID:
+        group = 1
+    else:
+        group = 2
+    return group, item.label.lower()

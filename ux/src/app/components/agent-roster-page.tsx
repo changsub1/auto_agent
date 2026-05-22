@@ -285,27 +285,28 @@ function buildAgents(config: AppConfig | null, runMode: string, defaults: RunDef
           },
         ]
       : [];
+  const integratorAgent: Agent = {
+    id: "integrator",
+    name: "Integrator",
+    role: "Merge & Wire",
+    description: runMode === "parallel" ? "Merges parallel code outputs into generated_app." : "Optional manual integration stage.",
+    capabilities: ["Merge", "Resolve", "QA Prep"],
+    provider: "Codex",
+    account: defaultAccount || codexAccount(config, 0),
+    model,
+    reasoning,
+    skill: config?.reference_profiles.integrator || "karpathy/integrator",
+    status: runMode === "parallel" ? "ready" : "idle",
+    contextLeft: null,
+    sessionId: "new",
+    lastAction: runMode === "parallel" ? "Enabled by parallel route" : "Available in manual graph",
+    enabled: runMode === "parallel",
+    group: runMode === "parallel" ? 6 : 4,
+    custom: false,
+  };
   const tail: Agent[] = [
     ...codeAgents,
-    {
-      id: "integrator",
-      name: "Integrator",
-      role: "Merge & Wire",
-      description: runMode === "parallel" ? "Merges parallel code outputs into generated_app." : "Skipped for single-code routes.",
-      capabilities: ["Merge", "Resolve", "QA Prep"],
-      provider: "Codex",
-      account: defaultAccount || codexAccount(config, 0),
-      model,
-      reasoning,
-      skill: config?.reference_profiles.integrator || "karpathy/integrator",
-      status: runMode === "parallel" ? "ready" : "idle",
-      contextLeft: null,
-      sessionId: "new",
-      lastAction: runMode === "parallel" ? "Enabled by parallel route" : "Not used by this route",
-      enabled: runMode === "parallel",
-      group: runMode === "parallel" ? 6 : 4,
-      custom: false,
-    },
+    ...(runMode === "parallel" || runMode === "manual" ? [integratorAgent] : []),
     {
       id: "qa_1",
       name: "QA Agent",
@@ -788,7 +789,7 @@ function PromptEditorPanel({
   onClose: () => void;
 }) {
   const qaPresets = promptConfig?.role === "qa_agent" ? presets.filter((preset) => preset.id.includes("qa")) : [];
-  const availableSkills = skills;
+  const availableSkills = skills.filter((skill) => isSkillRelevantToRole(skill, promptConfig?.role, promptConfig?.skill_id));
   const showGuidelinePresets = activeTab === "skill" && qaPresets.length > 0;
   const showSkillSelector = activeTab === "skill" && availableSkills.length > 0;
   const textValue =
@@ -908,6 +909,23 @@ function PromptEditorPanel({
       </section>
     </div>
   );
+}
+
+function isSkillRelevantToRole(skill: SkillInfo, role?: string, selectedSkillId?: string | null) {
+  if (selectedSkillId && skill.id === selectedSkillId) return true;
+  const recommended = skill.recommended_for || [];
+  if (recommended.length === 0) return true;
+  const aliases = roleAliases(role);
+  return recommended.some((item) => aliases.includes(item));
+}
+
+function roleAliases(role?: string) {
+  const normalized = (role || "").toLowerCase();
+  if (normalized === "planner_a" || normalized === "planner") return ["planner_a", "planner"];
+  if (normalized === "planner_b" || normalized === "reviewer") return ["planner_b", "reviewer"];
+  if (normalized === "qa_agent" || normalized === "qa") return ["qa_agent", "qa"];
+  if (normalized === "code_agent" || normalized === "code") return ["code_agent", "code"];
+  return normalized ? [normalized] : [];
 }
 
 function formatResetAt(value?: string | null) {
@@ -1734,7 +1752,7 @@ export function AgentRosterPage({
         account,
         model,
         reasoning,
-        skill: "none",
+        skill: "karpathy/code_agent",
         status: "ready",
         contextLeft: null,
         sessionId: "new",
@@ -1751,7 +1769,7 @@ export function AgentRosterPage({
         account,
         model,
         reasoning,
-        skill: "karpathy/code_agent",
+        skill: "architect.md",
         status: "ready",
         contextLeft: null,
         sessionId: "new",
@@ -1768,7 +1786,7 @@ export function AgentRosterPage({
         account,
         model,
         reasoning,
-        skill: "none",
+        skill: "karpathy/integrator",
         status: "ready",
         contextLeft: null,
         sessionId: "new",
@@ -1785,7 +1803,7 @@ export function AgentRosterPage({
         account,
         model,
         reasoning,
-        skill: "architect.md",
+        skill: "none",
         status: "ready",
         contextLeft: null,
         sessionId: "new",
@@ -1802,7 +1820,7 @@ export function AgentRosterPage({
         account,
         model,
         reasoning,
-        skill: "karpathy/integrator",
+        skill: "none",
         status: "ready",
         contextLeft: null,
         sessionId: "new",

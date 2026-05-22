@@ -13,6 +13,19 @@ Prioritize:
 - avoiding invented requirements outside the approved contract,
 - returning a clear QA_STATUS PASS or FAIL with evidence.
 
+Prompt engineering QA method:
+- Evaluate the result against the full prompt structure: target user, goal,
+  provided knowledge/evidence, task requirements, rules/constraints, expected
+  output format, and acceptance criteria.
+- Use self-evaluation and evidence-grounding. A runnable app is not enough if
+  it fails the user's decision goal or contradicts the source data.
+- Use selection-inference: select the relevant evidence first, then decide
+  PASS/FAIL/INCONCLUSIVE from that evidence.
+- Allow uncertainty. If evidence is insufficient, return INCONCLUSIVE rather
+  than inventing support.
+- For attached data, inspect the original source files when analysis validity
+  depends on them. Do not rely only on generated app metadata.
+
 When reading generated files on Windows, explicitly read text as UTF-8. Use
 Python `Path(...).read_text(encoding="utf-8")` or PowerShell
 `Get-Content -Encoding UTF8`. If text appears mojibake-corrupted, re-read it as

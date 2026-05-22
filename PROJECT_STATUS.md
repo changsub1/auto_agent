@@ -32,7 +32,8 @@ Orchestra는 로컬 Codex CLI를 멀티 에이전트처럼 호출해 기획, 구
   - GUI에서 agent별 System Prompt 수정 가능
   - Skill / Guideline과 System Prompt 분리
   - Code Agent 기본 skill은 Karpathy Guidelines
-  - ciembor agent-rules-books mini/nano 선택 가능
+  - Data Analysis Checklist 공통/Planner/Reviewer/QA, ciembor agent-rules-books mini/nano 선택 가능
+  - 강의자료의 프롬프트 7요소, 그라운딩, selection-inference, least-to-most, ReAct, self-evaluation 개념을 역할별 prompt에 반영
   - run 시작 시 prompt snapshot 저장
 - Human-in-the-loop
   - Planner 결과 승인
