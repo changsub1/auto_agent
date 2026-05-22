@@ -1376,10 +1376,11 @@ def build_single_code_assignment(config: LocalRunConfig, generated_app_dir: Path
 
 
 def render_single_code_context(final_plan: str, route: Any) -> str:
+    code_brief = extract_code_brief_from_plan(final_plan)
     return "\n\n".join(
         [
             "# Approved Plan",
-            final_plan.strip() or "(missing final plan)",
+            code_brief or "(missing final plan)",
             "# Routing",
             f"- mode: {getattr(route, 'mode', 'single')}",
             f"- reason: {getattr(route, 'reason', 'Single-code route selected.')}",
@@ -1391,6 +1392,30 @@ def render_single_code_context(final_plan: str, route: Any) -> str:
             ),
         ]
     )
+
+
+def extract_code_brief_from_plan(final_plan: str) -> str:
+    """Return the Code Brief section when present, otherwise the full plan."""
+
+    text = final_plan.strip()
+    if not text:
+        return ""
+
+    headings = list(re.finditer(r"(?m)^(#{1,6})\s+(.+?)\s*$", text))
+    for index, match in enumerate(headings):
+        title = match.group(2).strip().lower()
+        if title != "code brief":
+            continue
+
+        level = len(match.group(1))
+        end = len(text)
+        for next_match in headings[index + 1 :]:
+            if len(next_match.group(1)) <= level:
+                end = next_match.start()
+                break
+        return text[match.start() : end].strip()
+
+    return text
 
 
 async def run_single_code_stage_async(

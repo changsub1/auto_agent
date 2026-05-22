@@ -1,6 +1,6 @@
 [package]
 name = "orchestra"
-version = "0.1.0"
+version = "15.0.0"
 description = "Local desktop shell for the Codex multi-agent orchestration tool"
 authors = ["Orchestra"]
 edition = "2021"
