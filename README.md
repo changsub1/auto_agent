@@ -150,13 +150,6 @@ set ORCHESTRA_PYTHON=%PROJECT_DIR%\.venv\Scripts\python.exe
 npm run tauri:dev
 ```
 
-주의:
-
-```cmd
-npm run tauri:dev
-```
-
-가 맞습니다. `npm run tauri dev`가 아닙니다.
 
 ## 브라우저 개발 모드
 
