@@ -30,6 +30,21 @@ decision.
   mislead the user.
 - Verify that filters, presets, tabs, sorting, search, and drill-down controls
   update the displayed charts and tables correctly.
+- For entity-comparison dashboards, interact with the product flow: filter the
+  data, choose an entity from a row/chart/suggestion/search result, verify the
+  detail panel changes, switch views, and verify the selected or filtered basis
+  remains clear.
+- Check whether the first screen gives a clear next action, not just a
+  collection of metrics and charts.
+- If a score, grade, recommendation, or ranking is shown, check that the
+  formula, weights or basis, scale, and missing/small-sample caveats are visible
+  enough for a user to trust but not overread it.
+- If time fields exist and entities can be selected, check whether trend views
+  show selected entity vs filtered/all context, or clearly state that the trend
+  is market-level only.
+- For large entity lists, fail or warn when the only discovery path is exact
+  free-text search and no clickable list, suggestion list, autocomplete,
+  searchable select, or equivalent path is available.
 - Check whether chart types fit the analytical task:
   - bars or dot plots for comparison
   - lines for time trends
@@ -54,4 +69,3 @@ decision.
 - FAIL when the app does not run, data does not load, key visual requirements
   are missing, or the visualization materially misleads the user.
 - INCONCLUSIVE when evidence is insufficient to judge visual behavior.
-
